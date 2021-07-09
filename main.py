@@ -1,9 +1,28 @@
-import torch
+# Basic Modules
 import numpy as np
 import os
 import math
+import random
+# Deep Learning Modules
+import torch
 from torch.utils.data import Dataset
+from torch.utils.data import DataLoader
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+# Custom Modules from others -- author: KaiyangZhou
 from center_loss import CenterLoss
+
+
+def fix_random_seed(seed_value, use_cuda):
+    np.random.seed(seed_value)  # cpu vars
+    torch.manual_seed(seed_value)  # cpu  vars
+    random.seed(seed_value)  # Python
+    if use_cuda:
+        torch.cuda.manual_seed(seed_value)
+        torch.cuda.manual_seed_all(seed_value)  # gpu vars
+        torch.backends.cudnn.deterministic = True  # needed
+        torch.backends.cudnn.benchmark = False
 
 class EMGData(Dataset):
     def __init__(self, subject_number, chosen_rep_labels=None, chosen_class_labels=None, channel_shape = [6,8]):
@@ -49,6 +68,34 @@ class EMGData(Dataset):
 
         return data, labels
 
+def build_data_loader(batch_size, num_workers, pin_memory, data):
+    data_loader = DataLoader(
+        data,
+        batch_size=batch_size,
+        shuffle = True,
+        collate_fn = collate_fn,
+        num_workers = num_workers,
+        pin_memory = pin_memory
+    )
+    return data_loader
+
+def collate_fn(batch):
+    signals, labels = [], []
+    # Populate these lists from the batch
+    for signal, label, position in batch:
+        # Concate signal onto list signals
+        signals += [signal]
+        labels  += [label]
+   
+    # Convert lists to tensors
+    signals = pad_sequence(signals)
+    labels  = torch.stack(labels).long()
+
+    return signals, labels
+
+def pad_sequence(batch):
+    batch = [item.t() for item in batch]
+    return batch
 
 def extract_sEMG_features(data):
     
@@ -103,10 +150,25 @@ def make_npy(subject_id, dataset_characteristics, base_dir="Data/Raw_Data"):
 
 def main():
 
+    # Fix the random seed -- make results reproducible
+    # Found in utils.py, this sets the seed for the random, torch, and numpy libraries.
+    fix_random_seed(1, torch.cuda.is_available())
+    # get device available for computation
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if device.type == "cuda":
+        # My PC sucks, so I can't run things in parallel. If yours can, uncomment these lines
+        #num_workers = 2
+        #pin_memory  = True
+        num_workers = 0
+        pin_memory = False
+    else:
+        num_workers = 0
+        pin_memory  = False
+
     # Start by defining some dataset details:
     num_subjects       = 9 # Full dataset has 40, testing with first 9
     num_reps           = 6 # Rep 0 has 0 windows, there is only 6 reps. For some reason, subject 1 has rep 0 elements in the .mats
-    num_motions        = 49
+    num_motions        = 20 # The full number is 49, but my PC can't handle that many
     num_channels       = 48
     sampling_frequency = 1000 # This is assumed, check later.
     winsize            = 250
@@ -120,7 +182,7 @@ def main():
     CNN_classes = list(range(0,num_motions))
     for ele in sorted(ANN_classes, reverse=True):
         del CNN_classes[ele]
-    CNN_train_reps     = [1 2 3 4]
+    CNN_train_reps     = [1, 2, 3, 4]
     CNN_valdation_reps = [5]
     CNN_test_reps      = [6]
     
@@ -129,6 +191,7 @@ def main():
     # CNN parameters
     CNN_batch_size = 32
     CNN_lr         = 0.005
+    CNN_weight_decay = 0.001
     CNN_num_epochs = 100
     CNN_PLOT_LOSS  = False
     # AE parameters
@@ -140,9 +203,9 @@ def main():
 
     # Initialize parameters to be stored
     CNN_accuracy        = np.zeros((num_subjects))
-    CNN_training_loss   = np.zeros((num_subjects, CNN_num_epochs))
+    CNN_train_loss      = np.zeros((num_subjects, CNN_num_epochs))
     CNN_validation_loss = np.zeros((num_subjects, CNN_num_epochs))
-    AE_training_loss    = np.zeros((num_subjects, AE_num_epochs))
+    AE_train_loss       = np.zeros((num_subjects, AE_num_epochs))
     AE_validation_loss  = np.zeros((num_subjects, AE_num_epochs))
 
     for s_train in range(num_subjects):
@@ -152,11 +215,30 @@ def main():
         if not os.path.exists("Data/S"+str(s_train) + ".npy"):
             make_npy(s_train, dataset_characteristics)
         
-        
+        # BEGIN THE CNN TRAINING PROCEDURE
+        # Get the datasets prepared for training and testing
         CNN_train_data      = EMGData(s_train, chosen_class_labels = CNN_classes, chosen_rep_labels=CNN_train_reps,     channel_shape = channel_shape)
         CNN_validation_data = EMGData(s_train, chosen_class_labels = CNN_classes, chosen_rep_labels=CNN_valdation_reps, channel_shape = channel_shape)
+        # Define the dataloaders that prepare batches of data
+        CNN_train_loader      = build_data_loader(CNN_batch_size, num_workers, pin_memory, CNN_train_data) 
+        CNN_validation_loader = build_data_loader(CNN_batch_size, num_workers, pin_memory, CNN_validation_data) 
+        # Instantiate the CNN model.
+        CNN_model = CNNModel(n_output=num_motions,i_depth=3) # 3 refers to initial depth of input (RMS, WL, MAV Maps)
+        CNN_model.to(device)
+        # Training setup:
+        optimizer = optim.Adam(CNN_model.parameters(), lr=CNN_lr, weight_decay = CNN_weight_decay)
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', threshold=0.02, patience=3, factor=0.2)
 
+        for epoch in range(0, CNN_num_epochs):
+            CNN_train_loss[s_train,epoch]      = train(   CNN_model, CNN_train_loader,     optimizer, device)
+            CNN_validation_loss[s_train,epoch] = validate(CNN_model, CNN_validation_loader,           device)
 
+            scheduler.step(CNN_validation_loss[s_train, epoch])
+
+        CNN_test_data     = EMGData(s_train, chosen_class_labels = CNN_classes, chosen_rep_labels=CNN_test_reps,     channel_shape = channel_shape)
+        CNN_test_loader   = build_data_loader(CNN_batch_size, num_workers, pin_memory, CNN_test_data) 
+        CNN_accuracy[s_train] = test(CNN_model, CNN_test_loader, device)
+        
 #Conv - 2 conv, 1 flatten, 2 linear, softmax
 #centerloss + MSEloss
 
