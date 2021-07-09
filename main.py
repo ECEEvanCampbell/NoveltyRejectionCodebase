@@ -2,14 +2,77 @@ import torch
 import numpy as np
 import os
 import math
+from torch.utils.data import Dataset
+from center_loss import CenterLoss
+
+class EMGData(Dataset):
+    def __init__(self, subject_number, chosen_rep_labels=None, chosen_class_labels=None, channel_shape = [6,8]):
+
+        if isinstance(subject_number, list):
+            data = []
+            for n in subject_number:
+                data.append(np.load("Data/S{}.npy".format(str(n)), allow_pickle=True))
+
+            subject_data = np.concatenate(data)
+
+        else:
+            subject_data = np.load("Data/S{}.npy".format(str(subject_number)), allow_pickle=True)
+
+        if chosen_rep_labels is not None:
+            subject_data = [i for i in subject_data if i[2] in chosen_rep_labels]
+
+        if chosen_class_labels is not None:
+            subject_data = [i for i in subject_data if i[1] in chosen_class_labels]
+            
+        self.subject_number = subject_number
+
+        # extract classes
+        self.class_label = torch.tensor([i[1] for i in subject_data], dtype=torch.float)
+        self.rep_label   = torch.tensor([i[2] for i in subject_data], dtype=torch.int)
+        self.num_labels = torch.unique(self.class_label).shape[0]
+
+        data = torch.tensor([i[4] for i in subject_data], dtype=torch.float)
+        
+        features = extract_sEMG_features(data)
+        features = features.reshape((features.shape[0], 3, channel_shape[0], channel_shape[1]))
+        self.features = torch.tensor(features)
+
+    def __len__(self):
+        return len(self.class_label)
+
+    def __getitem__(self, idx):
+        if torch.is_tensor(idx):
+            idx = idx.tolist()
+
+        data = self.data[idx]
+        labels = self.class_label[idx]
+
+        return data, labels
 
 
-def compute_center_loss(features, centers, targets):
-    features = features.view(features.size(0), -1)
-    target_centers = centers[targets]
-    criterion = torch.nn.MSELoss()
-    center_loss = criterion(features, target_centers)
-    return center_loss
+def extract_sEMG_features(data):
+    
+    features = np.zeros((data.shape[0], data.shape[1]*3), dtype=float)
+    if torch.is_tensor(data):
+        data = data.numpy()
+    features[:,0:data.shape[1]] = getRMSfeat(data)
+    features[:,data.shape[1]:2*data.shape[1]] = getMAVfeat(data)
+    features[:,2*data.shape[1]:3*data.shape[1]] = getWLfeat(data)
+
+    return features
+
+def getMAVfeat(signal):
+    feat = np.mean(np.abs(signal),2)
+    return feat
+
+def getRMSfeat(signal):
+    feat = np.sqrt(np.mean(np.square(signal),2))
+    return feat
+
+def getWLfeat(signal):
+    feat = np.sum(np.abs(np.diff(signal,axis=2)),2)
+    return feat
+
 
 def make_npy(subject_id, dataset_characteristics, base_dir="Data/Raw_Data"):
     # Inside of dataset folder, get list of all files associated with the subject of subject_id
@@ -50,9 +113,17 @@ def main():
     wininc             = 150
     dataset_characteristics = (num_subjects, num_channels, num_reps, num_motions, winsize, wininc, sampling_frequency)
 
+    channel_shape = [6,8]
+
     # Data Division parameters (which classes are used to train CNN/AE models)
-    CNN_classes = []
-    ANN_classes = []
+    ANN_classes = [4,5,12,13] # Hold out classes 5,6,13,14. numbers are zero indexed
+    CNN_classes = list(range(0,num_motions))
+    for ele in sorted(ANN_classes, reverse=True):
+        del CNN_classes[ele]
+    CNN_train_reps     = [1 2 3 4]
+    CNN_valdation_reps = [5]
+    CNN_test_reps      = [6]
+    
 
     # Deep learning parameters
     # CNN parameters
@@ -81,8 +152,9 @@ def main():
         if not os.path.exists("Data/S"+str(s_train) + ".npy"):
             make_npy(s_train, dataset_characteristics)
         
-        # TODO: make this class
-        #CNN_data = EMGData(s_train, chosen_class_labels = CNN_classes, channel_shape = [6,8], features = ['MAV','RMS','WL'])
+        
+        CNN_train_data      = EMGData(s_train, chosen_class_labels = CNN_classes, chosen_rep_labels=CNN_train_reps,     channel_shape = channel_shape)
+        CNN_validation_data = EMGData(s_train, chosen_class_labels = CNN_classes, chosen_rep_labels=CNN_valdation_reps, channel_shape = channel_shape)
 
 
 #Conv - 2 conv, 1 flatten, 2 linear, softmax
