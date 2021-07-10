@@ -68,6 +68,82 @@ class EMGData(Dataset):
 
         return data, labels
 
+def train(CNN_model, CNN_train_loader, num_classes, optimizer, device, alpha=0.00005):
+    # Train the recognition model
+    # Model.train - enable gradient tracking, enable batch normalization, dropout
+    CNN_model.train()
+    # store losses of this epoch in a list (element = loss on batch)
+    losses_class = []
+    losses_group = []
+
+    for batch_idx, (data, label) in enumerate(CNN_train_loader):
+        # Send data, labels to GPU if available
+        data = data.to(device)
+        label = label.to(device)
+        # Passing data to model calls the forward method.
+        output = CNN_model(data)
+        # Output: (batch_size, 1, n_class)
+        loss_class = F.nll_loss(output.squeeze(), label)
+        loss_group = CenterLoss(num_classes,feat_dim = 2, use_gpu=True)
+        total_loss = loss_class + alpha * loss_group
+        # reset optimizer buffer
+        optimizer.zero_grad()
+        # send loss backwards
+        total_loss.backward()
+        # Update weights
+        optimizer.step()
+        # store the losses of this batch
+        losses_class.append(loss_class.item())
+        losses_group.append(loss_group.item())
+    return sum(losses_class)/len(losses_class),  sum(losses_group)/len(losses_group)
+
+
+def validation(CNN_model, CNN_validation_loader, num_classes, device, alpha=0.00005):
+    # Evaluate the recognition model
+    # Model.eval - disable gradient tracking, enable batch normalization, dropout
+    CNN_model.eval()
+    # store losses of this epoch in a list (element = loss on batch)
+    losses_class = []
+    losses_group = []
+
+    for batch_idx, (data, label) in enumerate(CNN_validation_loader):
+        # Send data, labels to GPU if available
+        data = data.to(device)
+        label = label.to(device)
+        # Passing data to model calls the forward method.
+        output = CNN_model(data)
+        # Output: (batch_size, 1, n_class)
+        loss_class = F.nll_loss(output.squeeze(), label)
+        loss_group = CenterLoss(num_classes,feat_dim = 2, use_gpu=True)
+
+        # No optimizer stuff to be done
+
+        # store the losses of this batch
+        losses_class.append(loss_class.item())
+        losses_group.append(loss_group.item())
+    return sum(losses_class)/len(losses_class),  sum(losses_group)/len(losses_group)
+
+def test(CNN_model, CNN_test_loader, device):
+    # Evaluate the model
+    # model.eval - disable gradient tracking, batch normalization, dropout
+    CNN_model.eval()
+    # Keep track of correct samples
+    correct = 0
+
+    for batch_idx, (data, label) in enumerate(CNN_test_loader):
+        # Send data, labels to GPU if GPU is available
+        data = data.to(device)
+        label = label.to(device)
+        # Passing data to model calls the forward method.
+        output = CNN_model(data)
+        predictions = output.argmax(dim=-1)
+        # Add up correct samples from batch
+        for i, prediction in enumerate(predictions):
+            correct += int(prediction == label[i])
+    # Return average accuracy 
+    return float(correct/ len(CNN_test_loader.dataset))
+
+
 def build_data_loader(batch_size, num_workers, pin_memory, data):
     data_loader = DataLoader(
         data,
