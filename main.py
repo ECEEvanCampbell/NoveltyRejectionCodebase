@@ -14,6 +14,57 @@ import torch.optim as optim
 from center_loss import CenterLoss
 
 
+class CNNModel(nn.Module):
+    def __init__(self, n_output, i_depth=3, nch=48):
+        super().__init__()
+        # How many filters we want per layer
+        filters = 32
+        linear_nodes = 512
+        input_to_linear = nch*filters
+
+
+        # What layers do we want
+        self.conv1 = nn.Conv2d(i_depth, filters, kernel_size=(3,3), padding=1)
+        self.bn1   = nn.BatchNorm2d(filters)
+
+        self.conv2 = nn.Conv2d(filters, filters, kernel_size=(3,3), padding=1)
+        self.bn2   = nn.BatchNorm2d(filters)
+
+
+        self.fc1 = nn.Linear(input_to_linear, linear_nodes)
+        self.fc2 = nn.Linear(linear_nodes, n_output)
+
+        self.drop = nn.Dropout(p=0.2)
+        self.activation = nn.ReLU()
+
+    def forward(self, x):
+        # Forward pass: input x, output probabilities of predicted class
+        # First layer
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.activation(x)
+        x = self.drop(x)
+
+        # Second Layer
+        x = self.conv2(x)
+        x = self.bn2(x)
+        x = self.activation(x)
+        x = self.drop(x)
+
+
+        # Convert to linear layer suitable input
+        x = x.view(x.shape[0],-1)
+       
+        # First linear layer, leave x for centerloss
+        x = self.fc1(x)
+        x = self.activation(x)
+        x = self.drop(x)
+         # final layer: linear layer that outputs N_Class neurons
+        y = self.fc2(x)
+        y = F.softmax(y, dim=1)
+
+        return x,y
+
 def fix_random_seed(seed_value, use_cuda):
     np.random.seed(seed_value)  # cpu vars
     torch.manual_seed(seed_value)  # cpu  vars
@@ -63,12 +114,12 @@ class EMGData(Dataset):
         if torch.is_tensor(idx):
             idx = idx.tolist()
 
-        data = self.data[idx]
+        data = self.features[idx]
         labels = self.class_label[idx]
 
         return data, labels
 
-def train(CNN_model, CNN_train_loader, num_classes, optimizer, device, alpha=0.00005):
+def train(CNN_model, CNN_train_loader, CNN_classes, optimizer, device, alpha=0.00005):
     # Train the recognition model
     # Model.train - enable gradient tracking, enable batch normalization, dropout
     CNN_model.train()
@@ -76,16 +127,20 @@ def train(CNN_model, CNN_train_loader, num_classes, optimizer, device, alpha=0.0
     losses_class = []
     losses_group = []
 
+    num_classes = len(CNN_classes)
+
     for batch_idx, (data, label) in enumerate(CNN_train_loader):
+        for label_idx, (l) in enumerate(label):
+            label[label_idx] = CNN_classes.index(l)
         # Send data, labels to GPU if available
         data = data.to(device)
         label = label.to(device)
         # Passing data to model calls the forward method.
-        output = CNN_model(data)
+        output_features, output_class = CNN_model(data)
         # Output: (batch_size, 1, n_class)
-        loss_class = F.nll_loss(output.squeeze(), label)
-        loss_group = CenterLoss(num_classes,feat_dim = 2, use_gpu=True)
-        total_loss = loss_class + alpha * loss_group
+        loss_class = F.cross_entropy(output_class, label)
+        #loss_group = CenterLoss(num_classes,feat_dim = 2, use_gpu=True) # This is instantiating loss, not using it.
+        total_loss = loss_class #+ alpha * loss_group
         # reset optimizer buffer
         optimizer.zero_grad()
         # send loss backwards
@@ -98,22 +153,25 @@ def train(CNN_model, CNN_train_loader, num_classes, optimizer, device, alpha=0.0
     return sum(losses_class)/len(losses_class),  sum(losses_group)/len(losses_group)
 
 
-def validation(CNN_model, CNN_validation_loader, num_classes, device, alpha=0.00005):
+def validate(CNN_model, CNN_validation_loader, CNN_classes, device, alpha=0.00005):
     # Evaluate the recognition model
     # Model.eval - disable gradient tracking, enable batch normalization, dropout
     CNN_model.eval()
     # store losses of this epoch in a list (element = loss on batch)
     losses_class = []
     losses_group = []
+    num_classes = len(CNN_classes)
 
     for batch_idx, (data, label) in enumerate(CNN_validation_loader):
+        for label_idx, (l) in enumerate(label):
+            label[label_idx] = CNN_classes.index(l)
         # Send data, labels to GPU if available
         data = data.to(device)
         label = label.to(device)
         # Passing data to model calls the forward method.
-        output = CNN_model(data)
+        output_features, output_class = CNN_model(data)
         # Output: (batch_size, 1, n_class)
-        loss_class = F.nll_loss(output.squeeze(), label)
+        loss_class = F.cross_entropy(output_class, label)
         loss_group = CenterLoss(num_classes,feat_dim = 2, use_gpu=True)
 
         # No optimizer stuff to be done
@@ -135,8 +193,8 @@ def test(CNN_model, CNN_test_loader, device):
         data = data.to(device)
         label = label.to(device)
         # Passing data to model calls the forward method.
-        output = CNN_model(data)
-        predictions = output.argmax(dim=-1)
+        _, output_class = CNN_model(data)
+        predictions = output_class.argmax(dim=-1)
         # Add up correct samples from batch
         for i, prediction in enumerate(predictions):
             correct += int(prediction == label[i])
@@ -156,22 +214,15 @@ def build_data_loader(batch_size, num_workers, pin_memory, data):
     return data_loader
 
 def collate_fn(batch):
-    signals, labels = [], []
     # Populate these lists from the batch
-    for signal, label, position in batch:
-        # Concate signal onto list signals
-        signals += [signal]
-        labels  += [label]
-   
-    # Convert lists to tensors
-    signals = pad_sequence(signals)
-    labels  = torch.stack(labels).long()
+    signals = torch.empty((len(batch),batch[0][0].shape[0], batch[0][0].shape[1],batch[0][0].shape[2] ))
+    labels = torch.empty((len(batch)))
+    for idx, (signal, label) in enumerate(batch):
+        signals[idx,:,:,:] = signal
+        labels[idx] = label
+    return signals, labels.long()
 
-    return signals, labels
 
-def pad_sequence(batch):
-    batch = [item.t() for item in batch]
-    return batch
 
 def extract_sEMG_features(data):
     
@@ -299,21 +350,21 @@ def main():
         CNN_train_loader      = build_data_loader(CNN_batch_size, num_workers, pin_memory, CNN_train_data) 
         CNN_validation_loader = build_data_loader(CNN_batch_size, num_workers, pin_memory, CNN_validation_data) 
         # Instantiate the CNN model.
-        CNN_model = CNNModel(n_output=num_motions,i_depth=3) # 3 refers to initial depth of input (RMS, WL, MAV Maps)
+        CNN_model = CNNModel(n_output=len(CNN_classes),i_depth=3) # 3 refers to initial depth of input (RMS, WL, MAV Maps)
         CNN_model.to(device)
         # Training setup:
         optimizer = optim.Adam(CNN_model.parameters(), lr=CNN_lr, weight_decay = CNN_weight_decay)
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', threshold=0.02, patience=3, factor=0.2)
 
         for epoch in range(0, CNN_num_epochs):
-            CNN_train_loss[s_train,epoch]      = train(   CNN_model, CNN_train_loader,     optimizer, device)
-            CNN_validation_loss[s_train,epoch] = validate(CNN_model, CNN_validation_loader,           device)
+            CNN_train_loss[s_train,epoch]      = train(   CNN_model, CNN_train_loader,  CNN_classes,   optimizer, device)
+            CNN_validation_loss[s_train,epoch] = validate(CNN_model, CNN_validation_loader, CNN_classes,          device)
 
             scheduler.step(CNN_validation_loss[s_train, epoch])
 
         CNN_test_data     = EMGData(s_train, chosen_class_labels = CNN_classes, chosen_rep_labels=CNN_test_reps,     channel_shape = channel_shape)
         CNN_test_loader   = build_data_loader(CNN_batch_size, num_workers, pin_memory, CNN_test_data) 
-        CNN_accuracy[s_train] = test(CNN_model, CNN_test_loader, device)
+        CNN_accuracy[s_train] = test(CNN_model, CNN_test_loader, CNN_classes, device)
         
 #Conv - 2 conv, 1 flatten, 2 linear, softmax
 #centerloss + MSEloss
