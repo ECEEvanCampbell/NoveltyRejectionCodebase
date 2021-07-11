@@ -3,6 +3,9 @@ import numpy as np
 import os
 import math
 import random
+from scipy import signal
+from sklearn.manifold import TSNE
+import matplotlib.pyplot as plt
 # Deep Learning Modules
 import torch
 from torch.utils.data import Dataset
@@ -14,8 +17,9 @@ import torch.optim as optim
 from center_loss import CenterLoss
 
 
+
 class CNNModel(nn.Module):
-    def __init__(self, n_output, i_depth=3, nch=48):
+    def __init__(self, n_output, i_depth=3, nch=12):
         super().__init__()
         # How many filters we want per layer
         filters = 32
@@ -128,6 +132,7 @@ def train(CNN_model, CNN_train_loader, CNN_classes, optimizer, device, alpha=0.0
     losses_group = []
 
     num_classes = len(CNN_classes)
+    center_loss = CenterLoss(num_classes=num_classes, feat_dim=CNN_model.fc2.in_features, use_gpu=True)
 
     for batch_idx, (data, label) in enumerate(CNN_train_loader):
         for label_idx, (l) in enumerate(label):
@@ -139,8 +144,8 @@ def train(CNN_model, CNN_train_loader, CNN_classes, optimizer, device, alpha=0.0
         output_features, output_class = CNN_model(data)
         # Output: (batch_size, 1, n_class)
         loss_class = F.cross_entropy(output_class, label)
-        #loss_group = CenterLoss(num_classes,feat_dim = 2, use_gpu=True) # This is instantiating loss, not using it.
-        total_loss = loss_class #+ alpha * loss_group
+        loss_group = center_loss(output_features, label)
+        total_loss = loss_class + alpha * loss_group
         # reset optimizer buffer
         optimizer.zero_grad()
         # send loss backwards
@@ -161,6 +166,7 @@ def validate(CNN_model, CNN_validation_loader, CNN_classes, device, alpha=0.0000
     losses_class = []
     losses_group = []
     num_classes = len(CNN_classes)
+    center_loss = CenterLoss(num_classes=num_classes, feat_dim=CNN_model.fc2.in_features, use_gpu=True)
 
     for batch_idx, (data, label) in enumerate(CNN_validation_loader):
         for label_idx, (l) in enumerate(label):
@@ -172,7 +178,7 @@ def validate(CNN_model, CNN_validation_loader, CNN_classes, device, alpha=0.0000
         output_features, output_class = CNN_model(data)
         # Output: (batch_size, 1, n_class)
         loss_class = F.cross_entropy(output_class, label)
-        loss_group = CenterLoss(num_classes,feat_dim = 2, use_gpu=True)
+        loss_group = center_loss(output_features, label)
 
         # No optimizer stuff to be done
 
@@ -181,7 +187,7 @@ def validate(CNN_model, CNN_validation_loader, CNN_classes, device, alpha=0.0000
         losses_group.append(loss_group.item())
     return sum(losses_class)/len(losses_class),  sum(losses_group)/len(losses_group)
 
-def test(CNN_model, CNN_test_loader, device):
+def test(CNN_model, CNN_test_loader, CNN_classes, device):
     # Evaluate the model
     # model.eval - disable gradient tracking, batch normalization, dropout
     CNN_model.eval()
@@ -190,6 +196,8 @@ def test(CNN_model, CNN_test_loader, device):
 
     for batch_idx, (data, label) in enumerate(CNN_test_loader):
         # Send data, labels to GPU if GPU is available
+        for label_idx, (l) in enumerate(label):
+            label[label_idx] = CNN_classes.index(l)
         data = data.to(device)
         label = label.to(device)
         # Passing data to model calls the forward method.
@@ -200,6 +208,17 @@ def test(CNN_model, CNN_test_loader, device):
             correct += int(prediction == label[i])
     # Return average accuracy 
     return float(correct/ len(CNN_test_loader.dataset))
+
+def get_CNN_features(CNN_model, CNN_loader, device):
+    CNN_model.eval()
+    output_features = torch.empty((CNN_loader.dataset.features.shape[0], CNN_model.fc2.in_features))
+    labels = torch.empty((CNN_loader.dataset.features.shape[0]))
+    for batch_idx, (data, label) in enumerate(CNN_loader):
+        data = data.to(device)
+        output_features[batch_idx*CNN_loader.batch_size:(batch_idx+1)*CNN_loader.batch_size,:], _ = CNN_model(data)
+        labels[batch_idx*CNN_loader.batch_size:(batch_idx+1)*CNN_loader.batch_size] = label
+
+    return output_features, labels
 
 
 def build_data_loader(batch_size, num_workers, pin_memory, data):
@@ -262,13 +281,16 @@ def make_npy(subject_id, dataset_characteristics, base_dir="Data/Raw_Data"):
 
         # load the file
         data = np.genfromtxt(path,delimiter=',')
-        
-        num_windows = math.floor((data.shape[0]-winsize)/wininc)
+        b, a = signal.iirnotch( 60/ (sampling_frequency/2), 20)
+        notched_data = signal.lfilter(b,a, data,axis=0)
+        b, a = signal.butter(N=4, Wn=[20/(sampling_frequency/2), 450/(sampling_frequency/2)],btype="band")
+        filtered_data = signal.lfilter(b,a, notched_data,axis=0)
+        num_windows = math.floor((filtered_data.shape[0]-winsize)/wininc)
 
         st=0
         ed=int(st+winsize * sampling_frequency / 1000)
         for w in range(num_windows):
-            training_data.append([subject_id,class_num-1, rep_num,w,data[st:ed,:].transpose()])
+            training_data.append([subject_id,class_num-1, rep_num,w,filtered_data[st:ed,:].transpose()])
             st = int(st+wininc * sampling_frequency / 1000)
             ed = int(ed+wininc * sampling_frequency / 1000)
 
@@ -293,16 +315,16 @@ def main():
         pin_memory  = False
 
     # Start by defining some dataset details:
-    num_subjects       = 9 # Full dataset has 40, testing with first 9
+    num_subjects       = 10 # Full dataset has 40, testing with first 10
     num_reps           = 6 # Rep 0 has 0 windows, there is only 6 reps. For some reason, subject 1 has rep 0 elements in the .mats
-    num_motions        = 20 # The full number is 49, but my PC can't handle that many
-    num_channels       = 48
+    num_motions        = 49 # The full number is 49, but my PC can't handle that many
+    num_channels       = 12
     sampling_frequency = 1000 # This is assumed, check later.
     winsize            = 250
     wininc             = 150
     dataset_characteristics = (num_subjects, num_channels, num_reps, num_motions, winsize, wininc, sampling_frequency)
 
-    channel_shape = [6,8]
+    channel_shape = [3,4]
 
     # Data Division parameters (which classes are used to train CNN/AE models)
     ANN_classes = [4,5,12,13] # Hold out classes 5,6,13,14. numbers are zero indexed
@@ -320,7 +342,7 @@ def main():
     CNN_lr         = 0.005
     CNN_weight_decay = 0.001
     CNN_num_epochs = 100
-    CNN_PLOT_LOSS  = False
+    CNN_PLOT_LOSS  = True
     # AE parameters
     AE_batch_size  = 32
     AE_lr          = 0.005
@@ -330,8 +352,10 @@ def main():
 
     # Initialize parameters to be stored
     CNN_accuracy        = np.zeros((num_subjects))
-    CNN_train_loss      = np.zeros((num_subjects, CNN_num_epochs))
-    CNN_validation_loss = np.zeros((num_subjects, CNN_num_epochs))
+    CNN_train_class_loss      = np.zeros((num_subjects, CNN_num_epochs))
+    CNN_validation_class_loss = np.zeros((num_subjects, CNN_num_epochs))
+    CNN_train_group_loss      = np.zeros((num_subjects, CNN_num_epochs))
+    CNN_validation_group_loss = np.zeros((num_subjects, CNN_num_epochs))
     AE_train_loss       = np.zeros((num_subjects, AE_num_epochs))
     AE_validation_loss  = np.zeros((num_subjects, AE_num_epochs))
 
@@ -350,32 +374,50 @@ def main():
         CNN_train_loader      = build_data_loader(CNN_batch_size, num_workers, pin_memory, CNN_train_data) 
         CNN_validation_loader = build_data_loader(CNN_batch_size, num_workers, pin_memory, CNN_validation_data) 
         # Instantiate the CNN model.
-        CNN_model = CNNModel(n_output=len(CNN_classes),i_depth=3) # 3 refers to initial depth of input (RMS, WL, MAV Maps)
+        CNN_model = CNNModel(n_output=len(CNN_classes),i_depth=3, nch=num_channels) # 3 refers to initial depth of input (RMS, WL, MAV Maps)
         CNN_model.to(device)
         # Training setup:
         optimizer = optim.Adam(CNN_model.parameters(), lr=CNN_lr, weight_decay = CNN_weight_decay)
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', threshold=0.02, patience=3, factor=0.2)
 
         for epoch in range(0, CNN_num_epochs):
-            CNN_train_loss[s_train,epoch]      = train(   CNN_model, CNN_train_loader,  CNN_classes,   optimizer, device)
-            CNN_validation_loss[s_train,epoch] = validate(CNN_model, CNN_validation_loader, CNN_classes,          device)
+            CNN_train_class_loss[s_train,epoch], CNN_train_group_loss[s_train, epoch]         = train(   CNN_model, CNN_train_loader,  CNN_classes,   optimizer, device)
+            CNN_validation_class_loss[s_train,epoch], CNN_validation_group_loss[s_train,epoch] = validate(CNN_model, CNN_validation_loader, CNN_classes,          device)
 
-            scheduler.step(CNN_validation_loss[s_train, epoch])
+            scheduler.step(CNN_validation_class_loss[s_train, epoch])
 
         CNN_test_data     = EMGData(s_train, chosen_class_labels = CNN_classes, chosen_rep_labels=CNN_test_reps,     channel_shape = channel_shape)
         CNN_test_loader   = build_data_loader(CNN_batch_size, num_workers, pin_memory, CNN_test_data) 
         CNN_accuracy[s_train] = test(CNN_model, CNN_test_loader, CNN_classes, device)
-        
-#Conv - 2 conv, 1 flatten, 2 linear, softmax
-#centerloss + MSEloss
 
+        if CNN_PLOT_LOSS:
+            fig, axs = plt.subplots(3)
+            fig.suptitle('CNN Loss Analysis')
+            axs[0].plot(CNN_train_class_loss[s_train,:], label="train_class_loss")
+            axs[0].plot(CNN_validation_class_loss[s_train,:], label="validation_class_loss")
+            axs[0].set(xlabel="Epoch",ylabel="Loss")
+            axs[0].set_title('Class Loss (Cross Entropy)')
+            axs[0].legend()
 
+            axs[1].plot(CNN_train_group_loss[s_train,:], label="train_group_loss")
+            axs[1].plot(CNN_validation_group_loss[s_train,:], label="validation_group_loss")
+            axs[1].set(xlabel="Epoch",ylabel="Loss")
+            axs[1].set_title('Center Loss (Cross Entropy)')
+            axs[1].legend()
+            axs[1].legend()
 
+            output_features, labels= get_CNN_features(CNN_model, CNN_test_loader, device)
+            tsne = TSNE(n_components=2)
+            projected_data = tsne.fit_transform(output_features.detach().numpy())
 
+            for class_num in CNN_classes:
+                class_ids = labels == class_num
+                axs[2].scatter(projected_data[class_ids,0],projected_data[class_ids,1],label=str(class_num))
+            axs[2].set(xlabel="tsne1",ylabel="tsne2")
+            axs[2].set_title("TSNE")
+            plt.show()
 
-
-
-
+            
 
 if __name__ == "__main__":
     main()
