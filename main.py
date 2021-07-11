@@ -69,6 +69,34 @@ class CNNModel(nn.Module):
 
         return x,y
 
+
+class AEModel(nn.Module):
+    def __init__(self, input_nodes):
+        super().__init__()
+
+        self.encode_fc1 = nn.Linear(input_nodes, 256)
+        self.encode_fc2 = nn.Linear(256, 64)
+
+        self.decode_fc1 = nn.Linear(64,256)
+        self.decode_fc2 = nn.Linear(256, input_nodes)
+
+        self.activation = nn.ReLU()
+        
+
+    def forward(self, x):
+        x = self.encode_fc1(x)
+        x = self.activation(x)
+        x = self.encode_fc2(x)
+        x = self.activation(x)
+
+        xhat = self.decode_fc1(x)
+        x = self.activation(x)
+        
+        xhat = self.decode_fc2(x)
+        xhat = self.activation(xhat)
+
+        return xhat
+
 def fix_random_seed(seed_value, use_cuda):
     np.random.seed(seed_value)  # cpu vars
     torch.manual_seed(seed_value)  # cpu  vars
@@ -368,23 +396,25 @@ def main():
         
         # BEGIN THE CNN TRAINING PROCEDURE
         # Get the datasets prepared for training and testing
+        # Procedure 1: prepare the data in feature image format
         CNN_train_data      = EMGData(s_train, chosen_class_labels = CNN_classes, chosen_rep_labels=CNN_train_reps,     channel_shape = channel_shape)
         CNN_validation_data = EMGData(s_train, chosen_class_labels = CNN_classes, chosen_rep_labels=CNN_valdation_reps, channel_shape = channel_shape)
         # Define the dataloaders that prepare batches of data
         CNN_train_loader      = build_data_loader(CNN_batch_size, num_workers, pin_memory, CNN_train_data) 
         CNN_validation_loader = build_data_loader(CNN_batch_size, num_workers, pin_memory, CNN_validation_data) 
+        # Procedure 2: train a CNN model using the closed set gestures.
         # Instantiate the CNN model.
         CNN_model = CNNModel(n_output=len(CNN_classes),i_depth=3, nch=num_channels) # 3 refers to initial depth of input (RMS, WL, MAV Maps)
         CNN_model.to(device)
         # Training setup:
-        optimizer = optim.Adam(CNN_model.parameters(), lr=CNN_lr, weight_decay = CNN_weight_decay)
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', threshold=0.02, patience=3, factor=0.2)
+        CNN_optimizer = optim.Adam(CNN_model.parameters(), lr=CNN_lr, weight_decay = CNN_weight_decay)
+        CNN_scheduler = optim.lr_scheduler.ReduceLROnPlateau(CNN_optimizer, 'min', threshold=0.02, patience=3, factor=0.2)
 
         for epoch in range(0, CNN_num_epochs):
-            CNN_train_class_loss[s_train,epoch], CNN_train_group_loss[s_train, epoch]         = train(   CNN_model, CNN_train_loader,  CNN_classes,   optimizer, device)
+            CNN_train_class_loss[s_train,epoch], CNN_train_group_loss[s_train, epoch]         = train(   CNN_model, CNN_train_loader,  CNN_classes,   CNN_optimizer, device)
             CNN_validation_class_loss[s_train,epoch], CNN_validation_group_loss[s_train,epoch] = validate(CNN_model, CNN_validation_loader, CNN_classes,          device)
 
-            scheduler.step(CNN_validation_class_loss[s_train, epoch])
+            CNN_scheduler.step(CNN_validation_class_loss[s_train, epoch])
 
         CNN_test_data     = EMGData(s_train, chosen_class_labels = CNN_classes, chosen_rep_labels=CNN_test_reps,     channel_shape = channel_shape)
         CNN_test_loader   = build_data_loader(CNN_batch_size, num_workers, pin_memory, CNN_test_data) 
@@ -416,6 +446,20 @@ def main():
             axs[2].set(xlabel="tsne1",ylabel="tsne2")
             axs[2].set_title("TSNE")
             plt.show()
+
+        # Procedure 3: Reject novel samples using AE.
+
+        # Get the features and build loader for them.
+
+        AE_model = AEModel(input_features = CNN_model.fc2.in_features)
+        AE_optimizer = optim.SGD(AE_model.parameters(),lr=AE_lr)
+        AE_scheduler = optim.lr_scheduler.ReduceLROnPlateau(AE_optimizer, 'min', threshold=0.02, patience=3, factor=0.2)
+
+        for epoch in range(0, AE_num_epochs):
+            AE_train_class_loss[s_train,epoch]      = AE_train(   AE_model,  CNN_train_loader,   AE_optimizer, device)
+            AE_validation_class_loss[s_train,epoch] = AE_validate(CNN_model, CNN_validation_loader,            device)
+
+            AE_scheduler.step(AE_validation_class_loss[s_train, epoch])
 
             
 
