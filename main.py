@@ -1,6 +1,10 @@
 # Basic Modules
 import numpy as np
 import os
+import sys
+import warnings
+if not sys.warnoptions:
+    warnings.simplefilter("ignore")
 import math
 import random
 from scipy import signal
@@ -312,9 +316,9 @@ def cascade_test(CNN_model, AE_model, CNN_test_loader, AE_test_loader, closedset
             else:
                 rejection += 1
     # CNN accuracy rejection = correct samples / non rejected samples
-    CNN_accuracy_rejection = correct / (CNN_test_loader.dataset.shape[0] - rejection)
+    CNN_accuracy_rejection = correct / (CNN_test_loader.dataset.class_label.shape[0] - rejection)
     # false rejection rate = rejected samples / total samples
-    false_rejection_rate = rejection / (CNN_test_loader.dataset.shape[0])
+    false_rejection_rate = rejection / (CNN_test_loader.dataset.class_label.shape[0])
     
     return CNN_accuracy_rejection, false_rejection_rate
 
