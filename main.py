@@ -69,7 +69,6 @@ class CNNModel(nn.Module):
 
         return x,y
 
-
 class AEModel(nn.Module):
     def __init__(self, input_nodes):
         super().__init__()
@@ -90,9 +89,9 @@ class AEModel(nn.Module):
         x = self.activation(x)
 
         xhat = self.decode_fc1(x)
-        x = self.activation(x)
+        xhat = self.activation(xhat)
         
-        xhat = self.decode_fc2(x)
+        xhat = self.decode_fc2(xhat)
         xhat = self.activation(xhat)
 
         return xhat
@@ -151,7 +150,7 @@ class EMGData(Dataset):
 
         return data, labels
 
-def train(CNN_model, CNN_train_loader, CNN_classes, optimizer, device, alpha=0.00005):
+def CNN_train(CNN_model, CNN_train_loader, CNN_classes, optimizer, device, alpha=0.00005):
     # Train the recognition model
     # Model.train - enable gradient tracking, enable batch normalization, dropout
     CNN_model.train()
@@ -185,8 +184,31 @@ def train(CNN_model, CNN_train_loader, CNN_classes, optimizer, device, alpha=0.0
         losses_group.append(loss_group.item())
     return sum(losses_class)/len(losses_class),  sum(losses_group)/len(losses_group)
 
+def AE_train(AE_model, AE_train_loader, optimizer, device):
+    # Train the feature reconstruction model
+    # Model.train - enable gradient tracking, enable batch normalization, dropout
+    AE_model.train()
+    # store losses of this epoch in a list (element = loss on batch)
+    losses = []
 
-def validate(CNN_model, CNN_validation_loader, CNN_classes, device, alpha=0.00005):
+    for batch_idx, (data) in enumerate(AE_train_loader):
+        # Send data, labels to GPU if available
+        data = data.to(device)
+        # Passing data to model calls the forward method.
+        output_features = AE_model(data)
+        # Output: (batch_size, 1, n_class)
+        loss = F.mse_loss(output_features, data)
+        # reset optimizer buffer
+        optimizer.zero_grad()
+        # send loss backwards
+        loss.backward(retain_graph=True)
+        # Update weights
+        optimizer.step()
+        # store the losses of this batch
+        losses.append(loss.item())
+    return sum(losses)/len(losses)
+
+def CNN_validate(CNN_model, CNN_validation_loader, CNN_classes, device, alpha=0.00005):
     # Evaluate the recognition model
     # Model.eval - disable gradient tracking, enable batch normalization, dropout
     CNN_model.eval()
@@ -215,7 +237,28 @@ def validate(CNN_model, CNN_validation_loader, CNN_classes, device, alpha=0.0000
         losses_group.append(loss_group.item())
     return sum(losses_class)/len(losses_class),  sum(losses_group)/len(losses_group)
 
-def test(CNN_model, CNN_test_loader, CNN_classes, device):
+def AE_validate(AE_model, AE_validation_loader, device):
+    # Validate the feature reconstruction model
+    # Model.eval - disable gradient tracking, enable batch normalization, dropout
+    AE_model.eval()
+    # store losses of this epoch in a list (element = loss on batch)
+    losses = []
+
+    for batch_idx, (data) in enumerate(AE_validation_loader):
+        # Send data, labels to GPU if available
+        data = data.to(device)
+        # Passing data to model calls the forward method.
+        output_features = AE_model(data)
+        # Output: (batch_size, 1, n_class)
+        loss = F.mse_loss(output_features, data)
+        
+        # No optimizer stuff to be done
+
+        # store the losses of this batch
+        losses.append(loss.item())
+    return sum(losses)/len(losses)
+
+def CNN_test(CNN_model, CNN_test_loader, CNN_classes, device):
     # Evaluate the model
     # model.eval - disable gradient tracking, batch normalization, dropout
     CNN_model.eval()
@@ -248,28 +291,42 @@ def get_CNN_features(CNN_model, CNN_loader, device):
 
     return output_features, labels
 
-
-def build_data_loader(batch_size, num_workers, pin_memory, data):
+def build_CNN_data_loader(batch_size, num_workers, pin_memory, data):
     data_loader = DataLoader(
         data,
         batch_size=batch_size,
         shuffle = True,
-        collate_fn = collate_fn,
+        collate_fn = CNN_collate_fn,
         num_workers = num_workers,
         pin_memory = pin_memory
     )
     return data_loader
 
-def collate_fn(batch):
+def build_AE_data_loader(batch_size, num_workers, pin_memory, data):
+    data_loader = DataLoader(
+        data,
+        batch_size=batch_size,
+        shuffle = True,
+        collate_fn = AE_collate_fn,
+        num_workers = num_workers,
+        pin_memory = pin_memory
+    )
+    return data_loader
+
+def CNN_collate_fn(batch):
     # Populate these lists from the batch
     signals = torch.empty((len(batch),batch[0][0].shape[0], batch[0][0].shape[1],batch[0][0].shape[2] ))
     labels = torch.empty((len(batch)))
-    for idx, (signal, label) in enumerate(batch):
-        signals[idx,:,:,:] = signal
+    for idx, (sample, label) in enumerate(batch):
+        signals[idx,:,:,:] = sample
         labels[idx] = label
     return signals, labels.long()
 
-
+def AE_collate_fn(batch):
+    signals = torch.empty((len(batch),batch[0].shape[0]))
+    for idx, (sample) in enumerate(batch):
+        signals[idx,:] = sample
+    return signals
 
 def extract_sEMG_features(data):
     
@@ -293,7 +350,6 @@ def getRMSfeat(signal):
 def getWLfeat(signal):
     feat = np.sum(np.abs(np.diff(signal,axis=2)),2)
     return feat
-
 
 def make_npy(subject_id, dataset_characteristics, base_dir="Data/Raw_Data"):
     # Inside of dataset folder, get list of all files associated with the subject of subject_id
@@ -324,6 +380,32 @@ def make_npy(subject_id, dataset_characteristics, base_dir="Data/Raw_Data"):
 
     np.random.shuffle(training_data)
     np.save("Data/S"+str(subject_id), training_data)
+
+def get_AE_rejection_threshold(AE_model, AE_validation_loader, device, rejection_tolerance=3):
+    # Validate the feature reconstruction model
+    # Model.eval - disable gradient tracking, enable batch normalization, dropout
+    AE_model.eval()
+    # store losses of this epoch in a list (element = loss on batch)
+    losses = np.zeros((AE_validation_loader.dataset.shape[0]))
+
+    for batch_idx, (data) in enumerate(AE_validation_loader):
+        # Send data, labels to GPU if available
+        data = data.to(device)
+        # Passing data to model calls the forward method.
+        output_features = AE_model(data)
+        # Output: (batch_size, 1, n_class)
+        loss = F.mse_loss(output_features, data, reduction='none').mean(axis=1)
+        
+        # No optimizer stuff to be done
+
+        # store the losses of this batch
+        losses[batch_idx*AE_validation_loader.batch_size:(1+batch_idx)*AE_validation_loader.batch_size] = loss.detach().cpu().numpy()
+    
+    mean_loss = losses.mean()
+    std_loss = losses.std()
+    
+    rejection_threshold = mean_loss + rejection_tolerance*std_loss
+    return rejection_threshold, losses
 
 def main():
 
@@ -370,12 +452,13 @@ def main():
     CNN_lr         = 0.005
     CNN_weight_decay = 0.001
     CNN_num_epochs = 100
-    CNN_PLOT_LOSS  = True
+    CNN_PLOT_LOSS  = False
     # AE parameters
     AE_batch_size  = 32
     AE_lr          = 0.005
     AE_num_epochs  = 100
     AE_PLOT_LOSS   = False
+    PLOT_REJECTION = False
 
 
     # Initialize parameters to be stored
@@ -400,8 +483,8 @@ def main():
         CNN_train_data      = EMGData(s_train, chosen_class_labels = CNN_classes, chosen_rep_labels=CNN_train_reps,     channel_shape = channel_shape)
         CNN_validation_data = EMGData(s_train, chosen_class_labels = CNN_classes, chosen_rep_labels=CNN_valdation_reps, channel_shape = channel_shape)
         # Define the dataloaders that prepare batches of data
-        CNN_train_loader      = build_data_loader(CNN_batch_size, num_workers, pin_memory, CNN_train_data) 
-        CNN_validation_loader = build_data_loader(CNN_batch_size, num_workers, pin_memory, CNN_validation_data) 
+        CNN_train_loader      = build_CNN_data_loader(CNN_batch_size, num_workers, pin_memory, CNN_train_data) 
+        CNN_validation_loader = build_CNN_data_loader(CNN_batch_size, num_workers, pin_memory, CNN_validation_data) 
         # Procedure 2: train a CNN model using the closed set gestures.
         # Instantiate the CNN model.
         CNN_model = CNNModel(n_output=len(CNN_classes),i_depth=3, nch=num_channels) # 3 refers to initial depth of input (RMS, WL, MAV Maps)
@@ -411,14 +494,14 @@ def main():
         CNN_scheduler = optim.lr_scheduler.ReduceLROnPlateau(CNN_optimizer, 'min', threshold=0.02, patience=3, factor=0.2)
 
         for epoch in range(0, CNN_num_epochs):
-            CNN_train_class_loss[s_train,epoch], CNN_train_group_loss[s_train, epoch]         = train(   CNN_model, CNN_train_loader,  CNN_classes,   CNN_optimizer, device)
-            CNN_validation_class_loss[s_train,epoch], CNN_validation_group_loss[s_train,epoch] = validate(CNN_model, CNN_validation_loader, CNN_classes,          device)
+            CNN_train_class_loss[s_train,epoch], CNN_train_group_loss[s_train, epoch]         = CNN_train(   CNN_model, CNN_train_loader,  CNN_classes,   CNN_optimizer, device)
+            CNN_validation_class_loss[s_train,epoch], CNN_validation_group_loss[s_train,epoch] = CNN_validate(CNN_model, CNN_validation_loader, CNN_classes,          device)
 
             CNN_scheduler.step(CNN_validation_class_loss[s_train, epoch])
 
         CNN_test_data     = EMGData(s_train, chosen_class_labels = CNN_classes, chosen_rep_labels=CNN_test_reps,     channel_shape = channel_shape)
-        CNN_test_loader   = build_data_loader(CNN_batch_size, num_workers, pin_memory, CNN_test_data) 
-        CNN_accuracy[s_train] = test(CNN_model, CNN_test_loader, CNN_classes, device)
+        CNN_test_loader   = build_CNN_data_loader(CNN_batch_size, num_workers, pin_memory, CNN_test_data) 
+        CNN_accuracy[s_train] = CNN_test(CNN_model, CNN_test_loader, CNN_classes, device)
 
         if CNN_PLOT_LOSS:
             fig, axs = plt.subplots(3)
@@ -448,18 +531,41 @@ def main():
             plt.show()
 
         # Procedure 3: Reject novel samples using AE.
+        AE_train_data, _      = get_CNN_features(CNN_model, CNN_train_loader, device)
+        AE_validation_data, _ = get_CNN_features(CNN_model, CNN_validation_loader, device)
+        # Turn these features into feature loaders
+        AE_train_loader      = build_AE_data_loader(AE_batch_size, num_workers, pin_memory, AE_train_data)
+        AE_validation_loader = build_AE_data_loader(AE_batch_size, num_workers, pin_memory, AE_validation_data)
 
         # Get the features and build loader for them.
 
-        AE_model = AEModel(input_features = CNN_model.fc2.in_features)
+        AE_model = AEModel(input_nodes = CNN_model.fc2.in_features)
+        AE_model.to(device)
         AE_optimizer = optim.SGD(AE_model.parameters(),lr=AE_lr)
         AE_scheduler = optim.lr_scheduler.ReduceLROnPlateau(AE_optimizer, 'min', threshold=0.02, patience=3, factor=0.2)
 
         for epoch in range(0, AE_num_epochs):
-            AE_train_class_loss[s_train,epoch]      = AE_train(   AE_model,  CNN_train_loader,   AE_optimizer, device)
-            AE_validation_class_loss[s_train,epoch] = AE_validate(CNN_model, CNN_validation_loader,            device)
+            AE_train_loss[s_train,epoch]      = AE_train(   AE_model, AE_train_loader,   AE_optimizer, device)
+            AE_validation_loss[s_train,epoch] = AE_validate(AE_model, AE_validation_loader,            device)
 
-            AE_scheduler.step(AE_validation_class_loss[s_train, epoch])
+            AE_scheduler.step(AE_validation_loss[s_train, epoch])
+
+        # Get the threshold for rejection with trained AE model
+        AE_rejection_threshold, validation_losses = get_AE_rejection_threshold(AE_model, AE_validation_loader, device)
+        if PLOT_REJECTION:
+            plt.hist(validation_losses,100)
+            plt.axvline(x=AE_rejection_threshold)
+            plt.xlabel(xlabel="Validation Loss")
+            plt.ylabel(ylabel="Frequency of Occurance")
+            plt.title(label="Rejection Threshold from AE Validation Loss")
+            plt.show()
+
+        # Get final metrics
+        # We have closed set gesture accuracy already from the CNN_accuracy variable
+        # CNN_accuracy
+        # Get the "false rejection rate": closed set samples that were deemed outliers.
+        # False_rejection_rate
+        # Get the "true rejection rate": unknown class samples that were not rejected.
 
             
 
