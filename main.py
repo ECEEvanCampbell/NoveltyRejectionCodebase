@@ -286,7 +286,7 @@ def cascade_test(CNN_model, AE_model, CNN_test_loader, AE_test_loader, closedset
     correct   = 0
     rejection = 0
     AE_data_iterator = iter(AE_test_loader)
-    predictions = np.zeros((CNN_test_loader.dataset.shape[0]))
+    predictions = np.zeros((CNN_test_loader.dataset.class_label.shape[0]))
     
     for batch_idx, (CNN_data, label) in enumerate(CNN_test_loader):
 
@@ -510,27 +510,27 @@ def main():
     CNN_batch_size = 32
     CNN_lr         = 0.005
     CNN_weight_decay = 0.001
-    CNN_num_epochs = 100
+    CNN_num_epochs = 1
     CNN_PLOT_LOSS  = False
     # AE parameters
     AE_batch_size  = 32
     AE_lr          = 0.005
-    AE_num_epochs  = 100
+    AE_num_epochs  = 1
     AE_PLOT_LOSS   = False
     PLOT_REJECTION = False
 
 
     # Initialize parameters to be stored
-    CNN_accuracy        = np.zeros((num_subjects))
+    CNN_accuracy              = np.zeros((num_subjects))
     CNN_train_class_loss      = np.zeros((num_subjects, CNN_num_epochs))
     CNN_validation_class_loss = np.zeros((num_subjects, CNN_num_epochs))
     CNN_train_group_loss      = np.zeros((num_subjects, CNN_num_epochs))
     CNN_validation_group_loss = np.zeros((num_subjects, CNN_num_epochs))
-    AE_train_loss       = np.zeros((num_subjects, AE_num_epochs))
-    AE_validation_loss  = np.zeros((num_subjects, AE_num_epochs))
-    CNN_accuracy_rejection = np.zeros((num_subjects))
-    false_rejection_rate = np.zeros((num_subjects))
-    positive_rejection_rate = np.zeros((num_subjects))
+    AE_train_loss             = np.zeros((num_subjects, AE_num_epochs))
+    AE_validation_loss        = np.zeros((num_subjects, AE_num_epochs))
+    CNN_accuracy_rejection    = np.zeros((num_subjects))
+    false_rejection_rate      = np.zeros((num_subjects))
+    positive_rejection_rate   = np.zeros((num_subjects))
 
     for s_train in range(num_subjects):
         
@@ -579,7 +579,6 @@ def main():
             axs[1].set(xlabel="Epoch",ylabel="Loss")
             axs[1].set_title('Center Loss (Cross Entropy)')
             axs[1].legend()
-            axs[1].legend()
 
             output_features, labels= get_CNN_features(CNN_model, CNN_test_loader, device)
             tsne = TSNE(n_components=2)
@@ -590,7 +589,7 @@ def main():
                 axs[2].scatter(projected_data[class_ids,0],projected_data[class_ids,1],label=str(class_num))
             axs[2].set(xlabel="tsne1",ylabel="tsne2")
             axs[2].set_title("TSNE")
-            plt.show()
+            fig.savefig(f"Figures/S{s_train}_ClosedSetCNNTraining.png")
 
         # Procedure 3: Reject novel samples using AE.
         AE_train_data, _      = get_CNN_features(CNN_model, CNN_train_loader, device)
@@ -614,6 +613,17 @@ def main():
 
             AE_scheduler.step(AE_validation_loss[s_train, epoch])
 
+        if AE_PLOT_LOSS:
+            
+            plt.plot(AE_train_loss[s_train,:], label="train_loss")
+            plt.plot(AE_validation_loss[s_train,:], label="validation_loss")
+            plt.xlabel(xlabel="Epoch")
+            plt.ylabel(ylabel="Loss")
+            plt.title(label='Class Loss (Cross Entropy)')
+            plt.legend()
+            plt.savefig(f"Figures/S{s_train}_AELoss.png")
+
+
         # Get the threshold for rejection with trained AE model
         AE_rejection_threshold, validation_losses = get_AE_rejection_threshold(AE_model, AE_validation_loader, device)
         if PLOT_REJECTION:
@@ -622,7 +632,7 @@ def main():
             plt.xlabel(xlabel="Validation Loss")
             plt.ylabel(ylabel="Frequency of Occurance")
             plt.title(label="Rejection Threshold from AE Validation Loss")
-            plt.show()
+            plt.savefig(f"Figures/S{s_train}_RejectionThreshold.png")
 
         # Get final metrics (4):
 
