@@ -423,7 +423,7 @@ def make_npy(subject_id, dataset_characteristics, base_dir="Data/Raw_Data"):
     np.random.shuffle(training_data)
     np.save("Data/S"+str(subject_id), training_data)
 
-def get_AE_rejection_threshold(AE_model, AE_validation_loader, device, rejection_tolerance=3):
+def get_AE_rejection_threshold(AE_model, AE_validation_loader, device, rejection_tolerance=2):
     # Validate the feature reconstruction model
     # Model.eval - disable gradient tracking, enable batch normalization, dropout
     AE_model.eval()
@@ -515,13 +515,13 @@ def main():
     CNN_lr         = 0.005
     CNN_weight_decay = 0.001
     CNN_num_epochs = 100
-    CNN_PLOT_LOSS  = False
+    CNN_PLOT_LOSS  = True
     # AE parameters
     AE_batch_size  = 32
-    AE_lr          = 0.005
+    AE_lr          = 0.1
     AE_num_epochs  = 100
-    AE_PLOT_LOSS   = False
-    PLOT_REJECTION = False
+    AE_PLOT_LOSS   = True
+    PLOT_REJECTION = True
 
 
     # Initialize parameters to be stored
@@ -554,22 +554,31 @@ def main():
         # Procedure 2: train a CNN model using the closed set gestures.
         # Instantiate the CNN model.
         CNN_model = CNNModel(n_output=len(closedset_classes),i_depth=3, nch=num_channels) # 3 refers to initial depth of input (RMS, WL, MAV Maps)
-        CNN_model.to(device)
+        
         # Training setup:
-        CNN_optimizer = optim.Adam(CNN_model.parameters(), lr=CNN_lr, weight_decay = CNN_weight_decay)
-        CNN_scheduler = optim.lr_scheduler.ReduceLROnPlateau(CNN_optimizer, 'min', threshold=0.02, patience=3, factor=0.2)
 
-        for epoch in range(0, CNN_num_epochs):
-            CNN_train_class_loss[s_train,epoch], CNN_train_group_loss[s_train, epoch]         = CNN_train(   CNN_model, CNN_train_loader,  closedset_classes,   CNN_optimizer, device)
-            CNN_validation_class_loss[s_train,epoch], CNN_validation_group_loss[s_train,epoch] = CNN_validate(CNN_model, CNN_validation_loader, closedset_classes,          device)
+        if os.path.exists(f"Models/S{s_train}.cnn"):
+            CNN_model.load_state_dict(torch.load(f"Models/S{s_train}.cnn"))
+            CNN_model.to(device)
+        else:
+            CNN_model.to(device)
+            CNN_optimizer = optim.Adam(CNN_model.parameters(), lr=CNN_lr, weight_decay = CNN_weight_decay)
+            CNN_scheduler = optim.lr_scheduler.ReduceLROnPlateau(CNN_optimizer, 'min', threshold=0.02, patience=3, factor=0.2)
 
-            CNN_scheduler.step(CNN_validation_class_loss[s_train, epoch])
+            for epoch in range(0, CNN_num_epochs):
+                CNN_train_class_loss[s_train,epoch], CNN_train_group_loss[s_train, epoch]         = CNN_train(   CNN_model, CNN_train_loader,  closedset_classes,   CNN_optimizer, device)
+                CNN_validation_class_loss[s_train,epoch], CNN_validation_group_loss[s_train,epoch] = CNN_validate(CNN_model, CNN_validation_loader, closedset_classes,          device)
+
+                CNN_scheduler.step(CNN_validation_class_loss[s_train, epoch])
+
+            torch.save(CNN_model.state_dict(), f"Models/S{s_train}.cnn")
 
         CNN_test_data     = EMGData(s_train, chosen_class_labels = closedset_classes, chosen_rep_labels=test_reps,     channel_shape = channel_shape)
         CNN_test_loader   = build_CNN_data_loader(CNN_batch_size, num_workers, pin_memory, CNN_test_data) 
         CNN_accuracy[s_train] = CNN_test(CNN_model, CNN_test_loader, closedset_classes, device)
 
         if CNN_PLOT_LOSS:
+            # CNN plot loss flag should only be enabled when the training loop is performed (no model is saved)
             fig, axs = plt.subplots(3)
             fig.suptitle('CNN Loss Analysis')
             axs[0].plot(CNN_train_class_loss[s_train,:], label="train_class_loss")
@@ -594,6 +603,7 @@ def main():
             axs[2].set(xlabel="tsne1",ylabel="tsne2")
             axs[2].set_title("TSNE")
             fig.savefig(f"Figures/S{s_train}_ClosedSetCNNTraining.png")
+            plt.clf()
 
         # Procedure 3: Reject novel samples using AE.
         AE_train_data, _      = get_CNN_features(CNN_model, CNN_train_loader, device)
@@ -607,25 +617,33 @@ def main():
         # Get the features and build loader for them.
 
         AE_model = AEModel(input_nodes = CNN_model.fc2.in_features)
-        AE_model.to(device)
-        AE_optimizer = optim.SGD(AE_model.parameters(),lr=AE_lr)
-        AE_scheduler = optim.lr_scheduler.ReduceLROnPlateau(AE_optimizer, 'min', threshold=0.02, patience=3, factor=0.2)
 
-        for epoch in range(0, AE_num_epochs):
-            AE_train_loss[s_train,epoch]      = AE_train(   AE_model, AE_train_loader,   AE_optimizer, device)
-            AE_validation_loss[s_train,epoch] = AE_validate(AE_model, AE_validation_loader,            device)
+        if os.path.exists(f"Models/S{s_train}.ae"):
+            AE_model.load_state_dict(torch.load(f"Models/S{s_train}.ae"))
+            AE_model.to(device)
+        else:
+            AE_model.to(device)
 
-            AE_scheduler.step(AE_validation_loss[s_train, epoch])
 
-        if AE_PLOT_LOSS:
-            
-            plt.plot(AE_train_loss[s_train,:], label="train_loss")
-            plt.plot(AE_validation_loss[s_train,:], label="validation_loss")
-            plt.xlabel(xlabel="Epoch")
-            plt.ylabel(ylabel="Loss")
-            plt.title(label='Class Loss (Cross Entropy)')
-            plt.legend()
-            plt.savefig(f"Figures/S{s_train}_AELoss.png")
+            AE_optimizer = optim.SGD(AE_model.parameters(),lr=AE_lr)
+            AE_scheduler = optim.lr_scheduler.ReduceLROnPlateau(AE_optimizer, 'min', threshold=0.02, patience=3, factor=0.2)
+
+            for epoch in range(0, AE_num_epochs):
+                AE_train_loss[s_train,epoch]      = AE_train(   AE_model, AE_train_loader,   AE_optimizer, device)
+                AE_validation_loss[s_train,epoch] = AE_validate(AE_model, AE_validation_loader,            device)
+
+                AE_scheduler.step(AE_validation_loss[s_train, epoch])
+
+            if AE_PLOT_LOSS:
+                
+                plt.plot(AE_train_loss[s_train,:], label="train_loss")
+                plt.plot(AE_validation_loss[s_train,:], label="validation_loss")
+                plt.xlabel(xlabel="Epoch")
+                plt.ylabel(ylabel="Loss")
+                plt.title(label='Class Loss (Cross Entropy)')
+                plt.legend()
+                plt.savefig(f"Figures/S{s_train}_AELoss.png")
+                plt.clf()
 
 
         # Get the threshold for rejection with trained AE model
@@ -637,6 +655,7 @@ def main():
             plt.ylabel(ylabel="Frequency of Occurance")
             plt.title(label="Rejection Threshold from AE Validation Loss")
             plt.savefig(f"Figures/S{s_train}_RejectionThreshold.png")
+            plt.clf()
 
         # Get final metrics (4):
 
