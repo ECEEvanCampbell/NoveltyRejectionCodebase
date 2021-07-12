@@ -514,12 +514,12 @@ def main():
     CNN_batch_size = 32
     CNN_lr         = 0.005
     CNN_weight_decay = 0.001
-    CNN_num_epochs = 1
+    CNN_num_epochs = 100
     CNN_PLOT_LOSS  = False
     # AE parameters
     AE_batch_size  = 32
     AE_lr          = 0.005
-    AE_num_epochs  = 1
+    AE_num_epochs  = 100
     AE_PLOT_LOSS   = False
     PLOT_REJECTION = False
 
