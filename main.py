@@ -200,8 +200,8 @@ def AE_train(AE_model, AE_train_loader, optimizer, device):
         data = data.to(device)
         # Passing data to model calls the forward method.
         output_features = AE_model(data)
-        # Output: (batch_size, 1, n_class)
-        loss = F.mse_loss(output_features, data)
+        # Output: (batch_size, n_features)
+        loss = F.l1_loss(output_features, data)
         # reset optimizer buffer
         optimizer.zero_grad()
         # send loss backwards
@@ -253,8 +253,8 @@ def AE_validate(AE_model, AE_validation_loader, device):
         data = data.to(device)
         # Passing data to model calls the forward method.
         output_features = AE_model(data)
-        # Output: (batch_size, 1, n_class)
-        loss = F.mse_loss(output_features, data)
+        # Output: (batch_size, n_features)
+        loss = F.l1_loss(output_features, data)
         
         # No optimizer stuff to be done
 
@@ -306,7 +306,7 @@ def cascade_test(CNN_model, AE_model, CNN_test_loader, AE_test_loader, closedset
         predictions = output_class.argmax(dim=-1)
 
         AE_reconstruction = AE_model(AE_data)
-        AE_loss = F.mse_loss(AE_reconstruction, AE_data, reduction='none').mean(axis=1)
+        AE_loss = F.l1_loss(AE_reconstruction, AE_data, reduction='none').mean(axis=1)
 
         for i, prediction in enumerate(predictions):
             # Check if we reject
@@ -423,7 +423,7 @@ def make_npy(subject_id, dataset_characteristics, base_dir="Data/Raw_Data"):
     np.random.shuffle(training_data)
     np.save("Data/S"+str(subject_id), training_data)
 
-def get_AE_rejection_threshold(AE_model, AE_validation_loader, device, rejection_tolerance=2):
+def get_AE_rejection_threshold(AE_model, AE_validation_loader, device, rejection_tolerance=1.5):
     # Validate the feature reconstruction model
     # Model.eval - disable gradient tracking, enable batch normalization, dropout
     AE_model.eval()
@@ -436,7 +436,7 @@ def get_AE_rejection_threshold(AE_model, AE_validation_loader, device, rejection
         # Passing data to model calls the forward method.
         output_features = AE_model(data)
         # Output: (batch_size, 1, n_class)
-        loss = F.mse_loss(output_features, data, reduction='none').mean(axis=1)
+        loss = F.l1_loss(output_features, data, reduction='none').mean(axis=1)
         
         # No optimizer stuff to be done
 
@@ -458,7 +458,7 @@ def outlier_test(AE_model, AE_outlier_loader, AE_rejection_threshold, device):
         data = data.to(device)
         
         AE_reconstruction = AE_model(data)
-        AE_loss = F.mse_loss(AE_reconstruction, data, reduction='none').mean(axis=1)
+        AE_loss = F.l1_loss(AE_reconstruction, data, reduction='none').mean(axis=1)
 
         for i, loss in enumerate(AE_loss):
             # Check if we reject
@@ -488,9 +488,9 @@ def main():
         pin_memory  = False
 
     # Start by defining some dataset details:
-    num_subjects       = 10 # Full dataset has 40, testing with first 10
+    num_subjects       = 40 # Full dataset has 40, testing with first 10
     num_reps           = 6 # Rep 0 has 0 windows, there is only 6 reps. For some reason, subject 1 has rep 0 elements in the .mats
-    num_motions        = 49 # The full number is 49, but my PC can't handle that many
+    num_motions        = 49 
     num_channels       = 12
     sampling_frequency = 1000 # This is assumed, check later.
     winsize            = 250
@@ -500,7 +500,7 @@ def main():
     channel_shape = [3,4]
 
     # Data Division parameters (which classes are used to train CNN/AE models)
-    outlier_classes = [4,5,12,13] # Hold out classes 5,6,13,14. numbers are zero indexed
+    outlier_classes = [5,6,13,14] # Hold out classes 5,6,13,14. numbers are zero indexed
     closedset_classes = list(range(0,num_motions))
     for ele in sorted(outlier_classes, reverse=True):
         del closedset_classes[ele]
@@ -519,6 +519,7 @@ def main():
     # AE parameters
     AE_batch_size  = 32
     AE_lr          = 0.1
+    AE_weight_decay = 0.001
     AE_num_epochs  = 100
     AE_PLOT_LOSS   = True
     PLOT_REJECTION = True
@@ -625,7 +626,7 @@ def main():
             AE_model.to(device)
 
 
-            AE_optimizer = optim.SGD(AE_model.parameters(),lr=AE_lr)
+            AE_optimizer = optim.Adam(AE_model.parameters(), lr=AE_lr, weight_decay = AE_weight_decay)#optim.SGD(AE_model.parameters(),lr=AE_lr)
             AE_scheduler = optim.lr_scheduler.ReduceLROnPlateau(AE_optimizer, 'min', threshold=0.02, patience=3, factor=0.2)
 
             for epoch in range(0, AE_num_epochs):
@@ -633,6 +634,8 @@ def main():
                 AE_validation_loss[s_train,epoch] = AE_validate(AE_model, AE_validation_loader,            device)
 
                 AE_scheduler.step(AE_validation_loss[s_train, epoch])
+
+            torch.save(AE_model.state_dict(), f"Models/S{s_train}.ae")
 
             if AE_PLOT_LOSS:
                 
