@@ -111,17 +111,17 @@ def fix_random_seed(seed_value, use_cuda):
         torch.backends.cudnn.benchmark = False
 
 class EMGData(Dataset):
-    def __init__(self, subject_number, chosen_rep_labels=None, chosen_class_labels=None, channel_shape = [6,8]):
+    def __init__(self, subject_number, dataset, chosen_rep_labels=None, chosen_class_labels=None, channel_shape = [6,8]):
 
         if isinstance(subject_number, list):
             data = []
             for n in subject_number:
-                data.append(np.load("Data/S{}.npy".format(str(n)), allow_pickle=True))
+                data.append(np.load("Data/" + dataset + "_S{}.npy".format(str(n)), allow_pickle=True))
 
             subject_data = np.concatenate(data)
 
         else:
-            subject_data = np.load("Data/S{}.npy".format(str(subject_number)), allow_pickle=True)
+            subject_data = np.load("Data/" + dataset + "_S{}.npy".format(str(subject_number)), allow_pickle=True)
 
         if chosen_rep_labels is not None:
             subject_data = [i for i in subject_data if i[2] in chosen_rep_labels]
@@ -393,15 +393,15 @@ def getWLfeat(signal):
     feat = np.sum(np.abs(np.diff(signal,axis=2)),2)
     return feat
 
-def make_npy(subject_id, dataset_characteristics, base_dir="Data/Raw_Data"):
+def make_npy(subject_id, dataset_characteristics, dataset, base_dir="Data/Raw_Data"):
     # Inside of dataset folder, get list of all files associated with the subject of subject_id
     (num_subjects, num_channels, num_reps, num_motions, winsize, wininc, sampling_frequency) = dataset_characteristics
-    subj_path = os.listdir(base_dir+'/S' + str(subject_id + 1))
+    subj_path = os.listdir(base_dir+'/' + dataset + '/S' + str(subject_id + 1))
     training_data = []
     # For this list:
     for f in subj_path:
         # Get the identifiers in the filename
-        path = os.path.join(base_dir,"S"+ str(subject_id+1),f)
+        path = os.path.join(base_dir,dataset,"S"+ str(subject_id+1),f)
         class_num = int(f.split('_')[1][1:])
         rep_num   = int(f.split('_')[3][1])
 
@@ -414,14 +414,14 @@ def make_npy(subject_id, dataset_characteristics, base_dir="Data/Raw_Data"):
         num_windows = math.floor((filtered_data.shape[0]-winsize)/wininc)
 
         st=0
-        ed=int(st+winsize * sampling_frequency / 1000)
+        ed=int(st+winsize * round(sampling_frequency / 1000))
         for w in range(num_windows):
             training_data.append([subject_id,class_num-1, rep_num,w,filtered_data[st:ed,:].transpose()])
-            st = int(st+wininc * sampling_frequency / 1000)
-            ed = int(ed+wininc * sampling_frequency / 1000)
+            st = int(st+wininc * round(sampling_frequency / 1000))
+            ed = int(ed+wininc * round(sampling_frequency / 1000))
 
     np.random.shuffle(training_data)
-    np.save("Data/S"+str(subject_id), training_data)
+    np.save("Data/" + dataset + "/_S"+str(subject_id), training_data)
 
 def get_AE_rejection_threshold(AE_model, AE_validation_loader, device, rejection_tolerance=1.5):
     # Validate the feature reconstruction model
@@ -487,26 +487,40 @@ def main():
         num_workers = 0
         pin_memory  = False
 
-    # Start by defining some dataset details:
-    num_subjects       = 40 # Full dataset has 40, testing with first 10
-    num_reps           = 6 # Rep 0 has 0 windows, there is only 6 reps. For some reason, subject 1 has rep 0 elements in the .mats
-    num_motions        = 49 
-    num_channels       = 12
-    sampling_frequency = 1000 # This is assumed, check later.
-    winsize            = 250
-    wininc             = 150
+    dataset = "Ninapro2"
+    winsize = 250
+    wininc = 150
+
+    if dataset == "Ninapro2":
+        # Start by defining some dataset details:
+        num_subjects       = 40 # Full dataset has 40, testing with first 10
+        num_reps           = 6 # Rep 0 has 0 windows, there is only 6 reps. For some reason, subject 1 has rep 0 elements in the .mats
+        num_motions        = 49 
+        num_channels       = 12
+        sampling_frequency = 1000 # This is assumed, check later.
+        channel_shape = [3,4]
+        outlier_classes = [5,6,13,14] # Hold out classes 5,6,13,14. numbers are zero indexed
+        closedset_classes = list(range(0,num_motions))
+    elif dataset == "SEEDS":
+        num_subjects = 25
+        num_reps = 6
+        num_motions = 13
+        num_channels = 256+8
+        sampling_frequency = 2048
+        channel_shape = [33,8]
+        outlier_classes = [1,2]
     dataset_characteristics = (num_subjects, num_channels, num_reps, num_motions, winsize, wininc, sampling_frequency)
 
-    channel_shape = [3,4]
-
-    # Data Division parameters (which classes are used to train CNN/AE models)
-    outlier_classes = [5,6,13,14] # Hold out classes 5,6,13,14. numbers are zero indexed
-    closedset_classes = list(range(0,num_motions))
+    train_reps = list(range(1,num_reps+1))
+    test_reps = train_reps.pop(-1)
+    validation_reps = train_reps.pop(-1)
     for ele in sorted(outlier_classes, reverse=True):
         del closedset_classes[ele]
-    train_reps     = [1, 2, 3, 4]
-    valdation_reps = [5]
-    test_reps      = [6]
+
+    
+
+    # Data Division parameters (which classes are used to train CNN/AE models)
+    
     
 
     # Deep learning parameters
@@ -541,14 +555,14 @@ def main():
         
         # If we have the dataset saved already as .npy files, we can load those in
         # Otherwise, make the .npy for that subject.
-        if not os.path.exists("Data/S"+str(s_train) + ".npy"):
-            make_npy(s_train, dataset_characteristics)
+        if not os.path.exists("Data/" + dataset +  "_S"+str(s_train) + ".npy"):
+            make_npy(s_train, dataset, dataset_characteristics)
         
         # BEGIN THE CNN TRAINING PROCEDURE
         # Get the datasets prepared for training and testing
         # Procedure 1: prepare the data in feature image format
-        CNN_train_data      = EMGData(s_train, chosen_class_labels = closedset_classes, chosen_rep_labels=train_reps,     channel_shape = channel_shape)
-        CNN_validation_data = EMGData(s_train, chosen_class_labels = closedset_classes, chosen_rep_labels=valdation_reps, channel_shape = channel_shape)
+        CNN_train_data      = EMGData(s_train, dataset, chosen_class_labels = closedset_classes, chosen_rep_labels=train_reps,     channel_shape = channel_shape)
+        CNN_validation_data = EMGData(s_train, dataset, chosen_class_labels = closedset_classes, chosen_rep_labels=validation_reps, channel_shape = channel_shape)
         # Define the dataloaders that prepare batches of data
         CNN_train_loader      = build_CNN_data_loader(CNN_batch_size, num_workers, pin_memory, CNN_train_data) 
         CNN_validation_loader = build_CNN_data_loader(CNN_batch_size, num_workers, pin_memory, CNN_validation_data) 
