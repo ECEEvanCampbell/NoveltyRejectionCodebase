@@ -393,7 +393,7 @@ def getWLfeat(signal):
     feat = np.sum(np.abs(np.diff(signal,axis=2)),2)
     return feat
 
-def make_npy(subject_id, dataset_characteristics, dataset, base_dir="Data/Raw_Data"):
+def make_npy(subject_id, dataset, dataset_characteristics, base_dir="Data/Raw_Data"):
     # Inside of dataset folder, get list of all files associated with the subject of subject_id
     (num_subjects, num_channels, num_reps, num_motions, winsize, wininc, sampling_frequency) = dataset_characteristics
     subj_path = os.listdir(base_dir+'/' + dataset + '/S' + str(subject_id + 1))
@@ -421,7 +421,7 @@ def make_npy(subject_id, dataset_characteristics, dataset, base_dir="Data/Raw_Da
             ed = int(ed+wininc * round(sampling_frequency / 1000))
 
     np.random.shuffle(training_data)
-    np.save("Data/" + dataset + "/_S"+str(subject_id), training_data)
+    np.save("Data/" + dataset + "_S"+str(subject_id), training_data)
 
 def get_AE_rejection_threshold(AE_model, AE_validation_loader, device, rejection_tolerance=1.5):
     # Validate the feature reconstruction model
@@ -512,8 +512,8 @@ def main():
     dataset_characteristics = (num_subjects, num_channels, num_reps, num_motions, winsize, wininc, sampling_frequency)
 
     train_reps = list(range(1,num_reps+1))
-    test_reps = train_reps.pop(-1)
-    validation_reps = train_reps.pop(-1)
+    test_reps = [train_reps.pop(-1)]
+    validation_reps = [train_reps.pop(-1)]
     for ele in sorted(outlier_classes, reverse=True):
         del closedset_classes[ele]
 
@@ -572,8 +572,8 @@ def main():
         
         # Training setup:
 
-        if os.path.exists(f"Models/S{s_train}.cnn"):
-            CNN_model.load_state_dict(torch.load(f"Models/S{s_train}.cnn"))
+        if os.path.exists(f"Models/{dataset}_S{s_train}.cnn"):
+            CNN_model.load_state_dict(torch.load(f"Models/{dataset}_S{s_train}.cnn"))
             CNN_model.to(device)
         else:
             CNN_model.to(device)
@@ -581,12 +581,12 @@ def main():
             CNN_scheduler = optim.lr_scheduler.ReduceLROnPlateau(CNN_optimizer, 'min', threshold=0.02, patience=3, factor=0.2)
 
             for epoch in range(0, CNN_num_epochs):
-                CNN_train_class_loss[s_train,epoch], CNN_train_group_loss[s_train, epoch]         = CNN_train(   CNN_model, CNN_train_loader,  closedset_classes,   CNN_optimizer, device)
+                CNN_train_class_loss[s_train,epoch], CNN_train_group_loss[s_train, epoch]          = CNN_train(   CNN_model, CNN_train_loader,  closedset_classes,   CNN_optimizer, device)
                 CNN_validation_class_loss[s_train,epoch], CNN_validation_group_loss[s_train,epoch] = CNN_validate(CNN_model, CNN_validation_loader, closedset_classes,          device)
 
                 CNN_scheduler.step(CNN_validation_class_loss[s_train, epoch])
 
-            torch.save(CNN_model.state_dict(), f"Models/S{s_train}.cnn")
+            torch.save(CNN_model.state_dict(), f"Models/{dataset}_S{s_train}.cnn")
 
         CNN_test_data     = EMGData(s_train, chosen_class_labels = closedset_classes, chosen_rep_labels=test_reps,     channel_shape = channel_shape)
         CNN_test_loader   = build_CNN_data_loader(CNN_batch_size, num_workers, pin_memory, CNN_test_data) 
@@ -617,7 +617,7 @@ def main():
                 axs[2].scatter(projected_data[class_ids,0],projected_data[class_ids,1],label=str(class_num))
             axs[2].set(xlabel="tsne1",ylabel="tsne2")
             axs[2].set_title("TSNE")
-            fig.savefig(f"Figures/S{s_train}_ClosedSetCNNTraining.png")
+            fig.savefig(f"Figures/{dataset}_S{s_train}_ClosedSetCNNTraining.png")
             plt.clf()
 
         # Procedure 3: Reject novel samples using AE.
@@ -633,8 +633,8 @@ def main():
 
         AE_model = AEModel(input_nodes = CNN_model.fc2.in_features)
 
-        if os.path.exists(f"Models/S{s_train}.ae"):
-            AE_model.load_state_dict(torch.load(f"Models/S{s_train}.ae"))
+        if os.path.exists(f"Models/{dataset}_S{s_train}.ae"):
+            AE_model.load_state_dict(torch.load(f"Models/{dataset}_S{s_train}.ae"))
             AE_model.to(device)
         else:
             AE_model.to(device)
@@ -659,7 +659,7 @@ def main():
                 plt.ylabel(ylabel="Loss")
                 plt.title(label='Class Loss (Cross Entropy)')
                 plt.legend()
-                plt.savefig(f"Figures/S{s_train}_AELoss.png")
+                plt.savefig(f"Figures/{dataset}_S{s_train}_AELoss.png")
                 plt.clf()
 
 
@@ -671,7 +671,7 @@ def main():
             plt.xlabel(xlabel="Validation Loss")
             plt.ylabel(ylabel="Frequency of Occurance")
             plt.title(label="Rejection Threshold from AE Validation Loss")
-            plt.savefig(f"Figures/S{s_train}_RejectionThreshold.png")
+            plt.savefig(f"Figures/{dataset}_S{s_train}_RejectionThreshold.png")
             plt.clf()
 
         # Get final metrics (4):
@@ -693,7 +693,7 @@ def main():
 
         positive_rejection_rate[s_train] = outlier_test(AE_model, AE_outlier_loader, AE_rejection_threshold, device)
 
-        print(f"Subject {s_train}:",
+        print(f"{dataset}_Subject {s_train}:",
             f"Closed Set Accuracy: {round(100*CNN_accuracy[s_train])} ",
             f"Closed Set Accuracy w/ Rejection: {round(100*CNN_accuracy_rejection[s_train])} ",
             f"False Rejection Rate: {round(100*false_rejection_rate[s_train])} ",
