@@ -543,7 +543,7 @@ def main():
     AE_batch_size  = 32
     AE_lr          = 0.1
     AE_weight_decay = 0.001
-    AE_num_epochs  = 100
+    AE_num_epochs  = 20
     AE_PLOT_LOSS   = True
     PLOT_REJECTION = True
 
@@ -675,9 +675,17 @@ def main():
         # Get the threshold for rejection with trained AE model
         AE_rejection_threshold, validation_losses = get_AE_rejection_threshold(AE_model, AE_validation_loader, device)
         if PLOT_REJECTION:
+
+            CNN_outlier_data        = EMGData(s_train, chosen_class_labels = outlier_classes, chosen_rep_labels=None, channel_shape = channel_shape)
+            CNN_outlier_loader      = build_CNN_data_loader(CNN_batch_size, num_workers, pin_memory, CNN_outlier_data) 
+            AE_outlier_data, _      = get_CNN_features(CNN_model, CNN_outlier_loader, device)
+            AE_outlier_loader       = build_AE_data_loader(AE_batch_size, num_workers, pin_memory, AE_outlier_data)
+            _, validation_losses_outlier = get_AE_rejection_threshold(AE_model, AE_outlier_loader, device)
+
             plt.hist(validation_losses,100)
+            plt.hist(validation_losses_outlier,100)
             plt.axvline(x=AE_rejection_threshold)
-            plt.xlabel(xlabel="Validation Loss")
+            plt.xlabel(xlabel="Loss")
             plt.ylabel(ylabel="Frequency of Occurance")
             plt.title(label="Rejection Threshold from AE Validation Loss")
             plt.savefig(f"Figures/{dataset}_S{s_train}_RejectionThreshold.png")
