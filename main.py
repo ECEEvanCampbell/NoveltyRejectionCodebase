@@ -111,7 +111,7 @@ def fix_random_seed(seed_value, use_cuda):
         torch.backends.cudnn.benchmark = False
 
 class EMGData(Dataset):
-    def __init__(self, subject_number, dataset, chosen_rep_labels=None, chosen_class_labels=None, channel_shape = [6,8]):
+    def __init__(self, subject_number, dataset, chosen_rep_labels=None, chosen_class_labels=None, channel_shape = [6,8],  buffer_channels = 0):
 
         if isinstance(subject_number, list):
             data = []
@@ -138,7 +138,7 @@ class EMGData(Dataset):
 
         data = torch.tensor([i[4] for i in subject_data], dtype=torch.float)
         
-        features = extract_sEMG_features(data)
+        features = extract_sEMG_features(data, buffer_channels)
         features = features.reshape((features.shape[0], 3, channel_shape[0], channel_shape[1]))
         self.features = torch.tensor(features)
 
@@ -370,14 +370,19 @@ def AE_collate_fn(batch):
         signals[idx,:] = sample
     return signals
 
-def extract_sEMG_features(data):
+def extract_sEMG_features(data, buffer_channels = 0):
     
-    features = np.zeros((data.shape[0], data.shape[1]*3), dtype=float)
+    features = np.zeros((data.shape[0], (data.shape[1]+buffer_channels)*3), dtype=float)
     if torch.is_tensor(data):
         data = data.numpy()
-    features[:,0:data.shape[1]] = getRMSfeat(data)
-    features[:,data.shape[1]:2*data.shape[1]] = getMAVfeat(data)
-    features[:,2*data.shape[1]:3*data.shape[1]] = getWLfeat(data)
+    endpoint1   = data.shape[1]
+    startpoint2 = endpoint1 + buffer_channels
+    endpoint2   = startpoint2 + data.shape[1]
+    startpoint3 = endpoint2 + buffer_channels
+    endpoint3   = startpoint3 + data.shape[1]
+    features[:,0:endpoint1] = getRMSfeat(data)
+    features[:,startpoint2:endpoint2] = getMAVfeat(data)
+    features[:,startpoint3:endpoint3] = getWLfeat(data)
 
     return features
 
@@ -395,7 +400,7 @@ def getWLfeat(signal):
 
 def make_npy(subject_id, dataset, dataset_characteristics, base_dir="Data/Raw_Data"):
     # Inside of dataset folder, get list of all files associated with the subject of subject_id
-    (num_subjects, num_channels, num_reps, num_motions, winsize, wininc, sampling_frequency) = dataset_characteristics
+    (num_subjects, num_channels, buffer_channels, num_reps, num_motions, winsize, wininc, sampling_frequency) = dataset_characteristics
     subj_path = os.listdir(base_dir+'/' + dataset + '/S' + str(subject_id + 1))
     training_data = []
     # For this list:
@@ -411,7 +416,7 @@ def make_npy(subject_id, dataset, dataset_characteristics, base_dir="Data/Raw_Da
         notched_data = signal.lfilter(b,a, data,axis=0)
         b, a = signal.butter(N=4, Wn=[20/(sampling_frequency/2), 450/(sampling_frequency/2)],btype="band")
         filtered_data = signal.lfilter(b,a, notched_data,axis=0)
-        num_windows = math.floor((filtered_data.shape[0]-winsize)/wininc)
+        num_windows = math.floor((filtered_data.shape[0]-winsize* round(sampling_frequency / 1000))/(wininc* round(sampling_frequency / 1000)))
 
         st=0
         ed=int(st+winsize * round(sampling_frequency / 1000))
@@ -487,7 +492,7 @@ def main():
         num_workers = 0
         pin_memory  = False
 
-    dataset = "Ninapro2"
+    dataset = "SEEDS"#"Ninapro2"
     winsize = 250
     wininc = 150
 
@@ -498,22 +503,26 @@ def main():
         num_motions        = 49 
         num_channels       = 12
         sampling_frequency = 1000 # This is assumed, check later.
-        channel_shape = [3,4]
-        outlier_classes = [5,6,13,14] # Hold out classes 5,6,13,14. numbers are zero indexed
-        closedset_classes = list(range(0,num_motions))
+        channel_shape      = [3,4]
+        buffer_channels    = 0
+        outlier_classes    = [5,6,13,14] # Hold out classes 5,6,13,14. numbers are zero indexed
+        
     elif dataset == "SEEDS":
-        num_subjects = 25
-        num_reps = 6
-        num_motions = 13
-        num_channels = 256+8
+        num_subjects       = 5 # Dataset has 25 subjects, but use 5 as pilot data
+        num_reps           = 6
+        num_motions        = 13
+        num_channels       = 134
         sampling_frequency = 2048
-        channel_shape = [33,8]
-        outlier_classes = [1,2]
-    dataset_characteristics = (num_subjects, num_channels, num_reps, num_motions, winsize, wininc, sampling_frequency)
+        buffer_channels    = 2 # zero channels to make rectangular input.
+        channel_shape      = [8, 17]
+        outlier_classes    = [1,2]
+
+    dataset_characteristics = (num_subjects, num_channels, buffer_channels, num_reps, num_motions, winsize, wininc, sampling_frequency)
 
     train_reps = list(range(1,num_reps+1))
     test_reps = [train_reps.pop(-1)]
     validation_reps = [train_reps.pop(-1)]
+    closedset_classes  = list(range(0,num_motions))
     for ele in sorted(outlier_classes, reverse=True):
         del closedset_classes[ele]
 
@@ -561,14 +570,14 @@ def main():
         # BEGIN THE CNN TRAINING PROCEDURE
         # Get the datasets prepared for training and testing
         # Procedure 1: prepare the data in feature image format
-        CNN_train_data      = EMGData(s_train, dataset, chosen_class_labels = closedset_classes, chosen_rep_labels=train_reps,     channel_shape = channel_shape)
-        CNN_validation_data = EMGData(s_train, dataset, chosen_class_labels = closedset_classes, chosen_rep_labels=validation_reps, channel_shape = channel_shape)
+        CNN_train_data      = EMGData(s_train, dataset, chosen_class_labels = closedset_classes, chosen_rep_labels=train_reps,     channel_shape = channel_shape, buffer_channels = buffer_channels)
+        CNN_validation_data = EMGData(s_train, dataset, chosen_class_labels = closedset_classes, chosen_rep_labels=validation_reps, channel_shape = channel_shape, buffer_channels = buffer_channels)
         # Define the dataloaders that prepare batches of data
         CNN_train_loader      = build_CNN_data_loader(CNN_batch_size, num_workers, pin_memory, CNN_train_data) 
         CNN_validation_loader = build_CNN_data_loader(CNN_batch_size, num_workers, pin_memory, CNN_validation_data) 
         # Procedure 2: train a CNN model using the closed set gestures.
         # Instantiate the CNN model.
-        CNN_model = CNNModel(n_output=len(closedset_classes),i_depth=3, nch=num_channels) # 3 refers to initial depth of input (RMS, WL, MAV Maps)
+        CNN_model = CNNModel(n_output=len(closedset_classes),i_depth=3, nch=num_channels+buffer_channels) # 3 refers to initial depth of input (RMS, WL, MAV Maps)
         
         # Training setup:
 
