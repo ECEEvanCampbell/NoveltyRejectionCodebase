@@ -154,7 +154,7 @@ class EMGData(Dataset):
 
         return data, labels
 
-def CNN_train(CNN_model, CNN_train_loader, closedset_classes, optimizer, device, alpha=0.00005):
+def CNN_train(CNN_model, CNN_train_loader, closedset_classes, optimizer, device, alpha=0.00005, transform=None):
     # Train the recognition model
     # Model.train - enable gradient tracking, enable batch normalization, dropout
     CNN_model.train()
@@ -171,6 +171,11 @@ def CNN_train(CNN_model, CNN_train_loader, closedset_classes, optimizer, device,
         # Send data, labels to GPU if available
         data = data.to(device)
         label = label.to(device)
+
+        if transform is not None:
+            data = transform(data)
+            data = data.to(device).to(torch.float)
+
         # Passing data to model calls the forward method.
         output_features, output_class = CNN_model(data)
         # Output: (batch_size, 1, n_class)
@@ -212,7 +217,7 @@ def AE_train(AE_model, AE_train_loader, optimizer, device):
         losses.append(loss.item())
     return sum(losses)/len(losses)
 
-def CNN_validate(CNN_model, CNN_validation_loader, closedset_classes, device, alpha=0.00005):
+def CNN_validate(CNN_model, CNN_validation_loader, closedset_classes, device, alpha=0.00005, transform=None):
     # Evaluate the recognition model
     # Model.eval - disable gradient tracking, enable batch normalization, dropout
     CNN_model.eval()
@@ -228,6 +233,9 @@ def CNN_validate(CNN_model, CNN_validation_loader, closedset_classes, device, al
         # Send data, labels to GPU if available
         data = data.to(device)
         label = label.to(device)
+        if transform is not None:
+            data = transform(data)
+            data = data.to(device).to(torch.float)
         # Passing data to model calls the forward method.
         output_features, output_class = CNN_model(data)
         # Output: (batch_size, 1, n_class)
@@ -262,7 +270,7 @@ def AE_validate(AE_model, AE_validation_loader, device):
         losses.append(loss.item())
     return sum(losses)/len(losses)
 
-def CNN_test(CNN_model, CNN_test_loader, closedset_classes, device):
+def CNN_test(CNN_model, CNN_test_loader, closedset_classes, device, transform=None):
     # Evaluate the model
     # model.eval - disable gradient tracking, batch normalization, dropout
     CNN_model.eval()
@@ -275,6 +283,9 @@ def CNN_test(CNN_model, CNN_test_loader, closedset_classes, device):
             label[label_idx] = closedset_classes.index(l)
         data = data.to(device)
         label = label.to(device)
+        if transform is not None:
+            data = transform(data)
+            data = data.to(device).to(torch.float)
         # Passing data to model calls the forward method.
         _, output_class = CNN_model(data)
         predictions = output_class.argmax(dim=-1)
@@ -408,7 +419,8 @@ def make_npy(subject_id, dataset, dataset_characteristics, base_dir="Data/Raw_Da
         # Get the identifiers in the filename
         path = os.path.join(base_dir,dataset,"S"+ str(subject_id+1),f)
         class_num = int(f.split('_')[1][1:])
-        rep_num   = int(f.split('_')[3][1])
+        rep_part  = f.split('_')[3]
+        rep_num   = int(rep_part.split('.')[0][1:])
 
         # load the file
         data = np.genfromtxt(path,delimiter=',')
@@ -475,6 +487,33 @@ def outlier_test(AE_model, AE_outlier_loader, AE_rejection_threshold, device):
 
     return positive_rejection_rate
 
+class Normalize(object):
+    def __init__(self, data, device):
+
+        min, _ = torch.min(data, 0) # Metric across training samples
+        for i in range(len(min.shape)-1):
+            min, _ = torch.min(min, -1)   # Metric across feature channels (RMS, etc.)
+        self.min = min.to(device)
+
+        max, _ = torch.max(data, 0)
+        for i in range(len(max.shape)-1):
+            max, _ = torch.max(max, -1)   # Metric across feature channels (RMS, etc.)
+        self.max = max.to(device)
+
+        d = self._normalize(data.to(device)) 
+
+        self.mean = torch.mean(d, dim=(0, 2, 3)).to(device)
+        self.std = torch.std(d, dim=(0, 2, 3)).to(device)
+
+    def __call__(self, x):
+        x = self._normalize(x)
+        x = x - self.mean[None, :, None, None]
+        x = x / self.std[None, :, None, None]
+        return x
+
+    def _normalize(self, x):
+        return (x - self.min[None, :, None, None]) / (self.max[None, :, None, None] - self.min[None, :, None, None])
+
 def main():
 
     # Fix the random seed -- make results reproducible
@@ -509,7 +548,7 @@ def main():
         
     elif dataset == "SEEDS":
         num_subjects       = 5 # Dataset has 25 subjects, but use 5 as pilot data
-        num_reps           = 6
+        num_reps           = 18
         num_motions        = 13
         num_channels       = 134
         sampling_frequency = 2048
@@ -543,7 +582,7 @@ def main():
     AE_batch_size  = 32
     AE_lr          = 0.1
     AE_weight_decay = 0.001
-    AE_num_epochs  = 20
+    AE_num_epochs  = 5
     AE_PLOT_LOSS   = True
     PLOT_REJECTION = True
 
@@ -570,11 +609,16 @@ def main():
         # BEGIN THE CNN TRAINING PROCEDURE
         # Get the datasets prepared for training and testing
         # Procedure 1: prepare the data in feature image format
+
         CNN_train_data      = EMGData(s_train, dataset, chosen_class_labels = closedset_classes, chosen_rep_labels=train_reps,     channel_shape = channel_shape, buffer_channels = buffer_channels)
-        CNN_validation_data = EMGData(s_train, dataset, chosen_class_labels = closedset_classes, chosen_rep_labels=validation_reps, channel_shape = channel_shape, buffer_channels = buffer_channels)
-        # Define the dataloaders that prepare batches of data
+        norm_transform = Normalize(CNN_train_data.features.data, device)
         CNN_train_loader      = build_CNN_data_loader(CNN_batch_size, num_workers, pin_memory, CNN_train_data) 
+        del CNN_train_data
+
+        CNN_validation_data = EMGData(s_train, dataset, chosen_class_labels = closedset_classes, chosen_rep_labels=validation_reps, channel_shape = channel_shape, buffer_channels = buffer_channels)
         CNN_validation_loader = build_CNN_data_loader(CNN_batch_size, num_workers, pin_memory, CNN_validation_data) 
+        del CNN_validation_data
+        
         # Procedure 2: train a CNN model using the closed set gestures.
         # Instantiate the CNN model.
         CNN_model = CNNModel(n_output=len(closedset_classes),i_depth=3, nch=num_channels+buffer_channels) # 3 refers to initial depth of input (RMS, WL, MAV Maps)
@@ -590,15 +634,16 @@ def main():
             CNN_scheduler = optim.lr_scheduler.ReduceLROnPlateau(CNN_optimizer, 'min', threshold=0.02, patience=3, factor=0.2)
 
             for epoch in range(0, CNN_num_epochs):
-                CNN_train_class_loss[s_train,epoch], CNN_train_group_loss[s_train, epoch]          = CNN_train(   CNN_model, CNN_train_loader,  closedset_classes,   CNN_optimizer, device)
-                CNN_validation_class_loss[s_train,epoch], CNN_validation_group_loss[s_train,epoch] = CNN_validate(CNN_model, CNN_validation_loader, closedset_classes,          device)
+                CNN_train_class_loss[s_train,epoch], CNN_train_group_loss[s_train, epoch]          = CNN_train(   CNN_model, CNN_train_loader,  closedset_classes,   CNN_optimizer, device, transform=norm_transform)
+                CNN_validation_class_loss[s_train,epoch], CNN_validation_group_loss[s_train,epoch] = CNN_validate(CNN_model, CNN_validation_loader, closedset_classes,          device    , transform=norm_transform)
 
                 CNN_scheduler.step(CNN_validation_class_loss[s_train, epoch])
 
             torch.save(CNN_model.state_dict(), f"Models/{dataset}_S{s_train}.cnn")
 
-        CNN_test_data     = EMGData(s_train, chosen_class_labels = closedset_classes, chosen_rep_labels=test_reps,     channel_shape = channel_shape)
-        CNN_test_loader   = build_CNN_data_loader(CNN_batch_size, num_workers, pin_memory, CNN_test_data) 
+        CNN_test_data     = EMGData(s_train, dataset,chosen_class_labels = closedset_classes, chosen_rep_labels=test_reps,     channel_shape = channel_shape, buffer_channels=buffer_channels, transform=norm_transform)
+        CNN_test_loader   = build_CNN_data_loader(CNN_batch_size, num_workers, pin_memory, CNN_test_data)
+        del CNN_test_data
         CNN_accuracy[s_train] = CNN_test(CNN_model, CNN_test_loader, closedset_classes, device)
 
         if CNN_PLOT_LOSS:
@@ -631,12 +676,16 @@ def main():
 
         # Procedure 3: Reject novel samples using AE.
         AE_train_data, _      = get_CNN_features(CNN_model, CNN_train_loader, device)
-        AE_validation_data, _ = get_CNN_features(CNN_model, CNN_validation_loader, device)
-        AE_test_data, _       = get_CNN_features(CNN_model, CNN_test_loader, device)
-        # Turn these features into feature loaders
         AE_train_loader      = build_AE_data_loader(AE_batch_size, num_workers, pin_memory, AE_train_data)
+        del AE_train_data
+
+        AE_validation_data, _ = get_CNN_features(CNN_model, CNN_validation_loader, device)
         AE_validation_loader = build_AE_data_loader(AE_batch_size, num_workers, pin_memory, AE_validation_data)
+        del AE_validation_data
+
+        AE_test_data, _       = get_CNN_features(CNN_model, CNN_test_loader, device)
         AE_test_loader       = build_AE_data_loader(AE_batch_size, num_workers, pin_memory, AE_test_data)
+        del AE_test_data
 
         # Get the features and build loader for them.
 
@@ -658,7 +707,7 @@ def main():
 
                 AE_scheduler.step(AE_validation_loss[s_train, epoch])
 
-            torch.save(AE_model.state_dict(), f"Models/S{s_train}.ae")
+            torch.save(AE_model.state_dict(), f"Models/{dataset}_S{s_train}.ae")
 
             if AE_PLOT_LOSS:
                 
@@ -676,14 +725,14 @@ def main():
         AE_rejection_threshold, validation_losses = get_AE_rejection_threshold(AE_model, AE_validation_loader, device)
         if PLOT_REJECTION:
 
-            CNN_outlier_data        = EMGData(s_train, chosen_class_labels = outlier_classes, chosen_rep_labels=None, channel_shape = channel_shape)
+            CNN_outlier_data        = EMGData(s_train, dataset, chosen_class_labels = outlier_classes, chosen_rep_labels=None, channel_shape = channel_shape, buffer_channels=buffer_channels)
             CNN_outlier_loader      = build_CNN_data_loader(CNN_batch_size, num_workers, pin_memory, CNN_outlier_data) 
             AE_outlier_data, _      = get_CNN_features(CNN_model, CNN_outlier_loader, device)
             AE_outlier_loader       = build_AE_data_loader(AE_batch_size, num_workers, pin_memory, AE_outlier_data)
             _, validation_losses_outlier = get_AE_rejection_threshold(AE_model, AE_outlier_loader, device)
 
-            plt.hist(validation_losses,100)
-            plt.hist(validation_losses_outlier,100)
+            plt.hist(validation_losses,100,alpha=0.5,color='b')
+            plt.hist(validation_losses_outlier,100,alpha=0.5,color='r')
             plt.axvline(x=AE_rejection_threshold)
             plt.xlabel(xlabel="Loss")
             plt.ylabel(ylabel="Frequency of Occurance")
@@ -703,7 +752,7 @@ def main():
         # 4: Get the "positive rejection rate": unknown class samples that were not rejected.
         # positive_rejection_rate
         
-        CNN_outlier_data        = EMGData(s_train, chosen_class_labels = outlier_classes, chosen_rep_labels=None, channel_shape = channel_shape)
+        CNN_outlier_data        = EMGData(s_train, chosen_class_labels = outlier_classes, chosen_rep_labels=None, channel_shape = channel_shape, buffer_channels=buffer_channels)
         CNN_outlier_loader      = build_CNN_data_loader(CNN_batch_size, num_workers, pin_memory, CNN_outlier_data) 
         AE_outlier_data, _      = get_CNN_features(CNN_model, CNN_outlier_loader, device)
         AE_outlier_loader       = build_AE_data_loader(AE_batch_size, num_workers, pin_memory, AE_outlier_data)
