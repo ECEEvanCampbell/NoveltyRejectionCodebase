@@ -10,7 +10,7 @@ def main():
 
     print("Converting .mat dataset to .csv")
 
-    num_subjects = 25
+    num_subjects = 5# Dataset has 25 subjects, but takes > 150Gb to format all. Just use 5 subjects as pilot test
     num_reps     = 6
     num_motions  = 13
     num_sessions = 3
@@ -23,24 +23,27 @@ def main():
         if s < 9:
             subj_path = os.listdir(dataset_location+'/subj0' + str(s + 1))
         else:
-            subj_path = os.listdir(dataset_characteristics+'/subj0' + str(s + 1))
+            subj_path = os.listdir(dataset_location+'/subj' + str(s + 1))
 
         
         for f in subj_path:
+            if f.split('_')[0] == "detop":
+                session_id = int(f.split('_')[3][4])
+                motion_id  = int(f.split('_')[4])
+                rep_id     = int(f.split('_')[5].split('.')[0])
+                
+                rep_saved = (session_id-1) * num_reps + rep_id
+                if s < 9:
+                    file_contents = scipy.io.loadmat(dataset_location+'/subj0' + str(s + 1) + "/" + f)
+                else:
+                    file_contents = scipy.io.loadmat(dataset_location +'/subj' + str(s + 1) + "/" + f)
 
-            session_id = int(f.split('_')[3][4])
-            motion_id  = int(f.split('_')[4])
-            rep_id     = int(f.split('_')[5].split('.')[0])
-            
-            rep_saved = (session_id-1) * num_reps + rep_id
+                emg_data = np.transpose(file_contents['emg'])
 
-            file_contents = scipy.io.loadmat(dataset_location+'/subj0' + str(s + 1) + "/" + f)
-            emg_data = np.transpose(file_contents['emg'])
+                if not( os.path.exists(save_location + "/S" + str(s+1)) ):
+                    os.mkdir(save_location + "/S" + str(s+1))
 
-            if not( os.path.exists(save_location + "/S" + str(s+1)) ):
-                os.mkdir(save_location + "/S" + str(s+1))
-
-            np.savetxt(save_location + "/S" + str(s+1) + "/S" + str(s+1) + "_C" + str(motion_id) + "_P1_R" + str(rep_saved) + ".csv", emg_data, delimiter=',')
+                np.savetxt(save_location + "/S" + str(s+1) + "/S" + str(s+1) + "_C" + str(motion_id) + "_P1_R" + str(rep_saved) + ".csv", emg_data, delimiter=',')
 
 
 
