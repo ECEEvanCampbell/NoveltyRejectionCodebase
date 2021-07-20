@@ -383,17 +383,12 @@ def AE_collate_fn(batch):
 
 def extract_sEMG_features(data, buffer_channels = 0):
     
-    features = np.zeros((data.shape[0], (data.shape[1]+buffer_channels)*3), dtype=float)
+    features = np.zeros((data.shape[0], 3, (data.shape[1]+buffer_channels)), dtype=float)
     if torch.is_tensor(data):
         data = data.numpy()
-    endpoint1   = data.shape[1]
-    startpoint2 = endpoint1 + buffer_channels
-    endpoint2   = startpoint2 + data.shape[1]
-    startpoint3 = endpoint2 + buffer_channels
-    endpoint3   = startpoint3 + data.shape[1]
-    features[:,0:endpoint1] = getRMSfeat(data)
-    features[:,startpoint2:endpoint2] = getMAVfeat(data)
-    features[:,startpoint3:endpoint3] = getWLfeat(data)
+    features[:,0, 0:data.shape[1]] = getRMSfeat(data)
+    features[:,1, 0:data.shape[1]] = getMAVfeat(data)
+    features[:,2, 0:data.shape[1]] = getWLfeat(data)
 
     return features
 
@@ -428,12 +423,12 @@ def make_npy(subject_id, dataset, dataset_characteristics, base_dir="Data/Raw_Da
         notched_data = signal.lfilter(b,a, data,axis=0)
         b, a = signal.butter(N=4, Wn=[20/(sampling_frequency/2), 450/(sampling_frequency/2)],btype="band")
         filtered_data = signal.lfilter(b,a, notched_data,axis=0)
-        num_windows = math.floor((filtered_data.shape[0]-winsize* round(sampling_frequency / 1000))/(wininc* round(sampling_frequency / 1000)))
+        num_windows = math.floor((data.shape[0]-winsize* round(sampling_frequency / 1000))/(wininc* round(sampling_frequency / 1000)))
 
         st=0
         ed=int(st+winsize * round(sampling_frequency / 1000))
         for w in range(num_windows):
-            training_data.append([subject_id,class_num-1, rep_num,w,filtered_data[st:ed,:].transpose()])
+            training_data.append([subject_id,class_num-1, rep_num,w,data[st:ed,:].transpose()])
             st = int(st+wininc * round(sampling_frequency / 1000))
             ed = int(ed+wininc * round(sampling_frequency / 1000))
 
@@ -580,7 +575,7 @@ def main():
     CNN_PLOT_LOSS  = True
     # AE parameters
     AE_batch_size  = 32
-    AE_lr          = 0.1
+    AE_lr          = 0.01
     AE_weight_decay = 0.001
     AE_num_epochs  = 5
     AE_PLOT_LOSS   = True
@@ -641,10 +636,10 @@ def main():
 
             torch.save(CNN_model.state_dict(), f"Models/{dataset}_S{s_train}.cnn")
 
-        CNN_test_data     = EMGData(s_train, dataset,chosen_class_labels = closedset_classes, chosen_rep_labels=test_reps,     channel_shape = channel_shape, buffer_channels=buffer_channels, transform=norm_transform)
+        CNN_test_data     = EMGData(s_train, dataset,chosen_class_labels = closedset_classes, chosen_rep_labels=test_reps,     channel_shape = channel_shape, buffer_channels=buffer_channels)
         CNN_test_loader   = build_CNN_data_loader(CNN_batch_size, num_workers, pin_memory, CNN_test_data)
         del CNN_test_data
-        CNN_accuracy[s_train] = CNN_test(CNN_model, CNN_test_loader, closedset_classes, device)
+        CNN_accuracy[s_train] = CNN_test(CNN_model, CNN_test_loader, closedset_classes, device, transform=norm_transform)
 
         if CNN_PLOT_LOSS:
             # CNN plot loss flag should only be enabled when the training loop is performed (no model is saved)
@@ -752,7 +747,7 @@ def main():
         # 4: Get the "positive rejection rate": unknown class samples that were not rejected.
         # positive_rejection_rate
         
-        CNN_outlier_data        = EMGData(s_train, chosen_class_labels = outlier_classes, chosen_rep_labels=None, channel_shape = channel_shape, buffer_channels=buffer_channels)
+        CNN_outlier_data        = EMGData(s_train, dataset, chosen_class_labels = outlier_classes, chosen_rep_labels=None, channel_shape = channel_shape, buffer_channels=buffer_channels)
         CNN_outlier_loader      = build_CNN_data_loader(CNN_batch_size, num_workers, pin_memory, CNN_outlier_data) 
         AE_outlier_data, _      = get_CNN_features(CNN_model, CNN_outlier_loader, device)
         AE_outlier_loader       = build_AE_data_loader(AE_batch_size, num_workers, pin_memory, AE_outlier_data)
